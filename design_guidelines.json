@@ -1,0 +1,137 @@
+{
+  "app_name": "ROLLOW",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A highly readable, fast, and structured cafe management tool that frames operational utility with warm terracotta accents and crisp native spacing.",
+  "color": {
+    "surface": "#FFFFFF",
+    "onSurface": "#1C1B1A",
+    "surfaceSecondary": "#F7F7F5",
+    "onSurfaceSecondary": "#1C1B1A",
+    "surfaceTertiary": "#EAEAE8",
+    "onSurfaceTertiary": "#4A4946",
+    "surfaceInverse": "#1C1B1A",
+    "onSurfaceInverse": "#FFFFFF",
+    "muted": "#8C8B88",
+    "brand": "#D35400",
+    "onBrand": "#FFFFFF",
+    "brandPrimary": "#D35400",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#F3EAE3",
+    "onBrandSecondary": "#D35400",
+    "brandTertiary": "#FAEDE6",
+    "onBrandTertiary": "#D35400",
+    "success": "#347355",
+    "onSuccess": "#FFFFFF",
+    "warning": "#F5A623",
+    "onWarning": "#FFFFFF",
+    "error": "#D32F2F",
+    "onError": "#FFFFFF",
+    "info": "#607D8B",
+    "onInfo": "#FFFFFF",
+    "border": "#E0DFDC",
+    "borderStrong": "#BDBBBC",
+    "divider": "#EFEFED"
+  },
+  "typography": {
+    "displayFontFamily": "System",
+    "textFontFamily": "System",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous padding around cards (lg/xl), with tighter grouping (sm) for dense POS items. Avoid accidental empty space.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": "true",
+    "do's": [
+      "Use on sticky header tabs (e.g., POS categories).",
+      "Use on bottom tab bar when content scrolls behind it."
+    ],
+    "dont's": [
+      "Never use on form fields or standard list rows."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "POS / Kasir",
+      "purpose": "A fast, touch-friendly point of sale interface for taking cafe orders.",
+      "states": {
+        "loading": "Skeleton grid for menu items.",
+        "empty": "Illustration of a coffee cup with 'No items found in this category'.",
+        "error": "Error loading menu with a retry button."
+      },
+      "layout": "Responsive layout. On mobile: Top sticky scrollable category pills (glassmorphism), 2-column item grid, persistent sticky floating Cart summary CTA at bottom. On tablet/web: 3-col/4-col grid for items on the left, fixed Cart/Order panel on the right."
+    },
+    {
+      "name": "Dashboard / Beranda",
+      "purpose": "High-level overview of roles, shift status, and key metrics.",
+      "states": {
+        "loading": "Spinner centered in dashboard cards.",
+        "empty": "No active shift or data yet - prompt to Clock In.",
+        "error": "Unable to fetch metrics with retry."
+      },
+      "layout": "Single column on mobile (cards stack), multi-column grid on tablet/web using space-between and wrap. Cards use surfaceSecondary with border."
+    },
+    {
+      "name": "Inventory / Gudang",
+      "purpose": "Manage stock across multiple locations (Gudang, Bar, Kitchen).",
+      "states": {
+        "loading": "List skeleton.",
+        "empty": "Zero inventory items found, show 'Stock Kosong'.",
+        "error": "Failed to sync inventory."
+      },
+      "layout": "List view with thumbnail, name, and robust stepper controls for stock adjustment. Status pills (brandTertiary for low stock warning) aligned to the right."
+    }
+  ],
+  "images": {
+    "login_hero": {
+      "url": "https://images.unsplash.com/photo-1613274554329-70f997f5789f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwyfHxjb3p5JTIwbW9kZXJuJTIwY2FmZSUyMGludGVyaW9yfGVufDB8fHx8MTc5MTQwMTMxMXww&ixlib=rb-4.1.0&q=85",
+      "alt": "Cozy modern cafe interior"
+    },
+    "empty_state_coffee": {
+      "url": "https://images.unsplash.com/photo-1521017432531-fbd92d768814?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxjb3p5JTIwbW9kZXJuJTIwY2FmZSUyMGludGVyaW9yfGVufDB8fHx8MTc5MTQwMTMxMXww&ixlib=rb-4.1.0&q=85",
+      "alt": "Empty cafe scene"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Focus heavily on RESPONSIVE DESIGN: The POS screen must adapt from a stacked layout on mobile (grid + sticky bottom cart CTA) to a side-by-side layout on tablet/web (menu left, persistent cart right).",
+    "Use native system fonts without any font loading, preserving app speed.",
+    "Adopt '1 iOS-Native Clean' rules: highly readable, fast UI with solid grouping. Use surfaceSecondary for cards.",
+    "Ensure touch targets are >= 44x44pt, specifically for the POS steppers (+/- buttons) and checkout actions.",
+    "Keep Indonesian UI texts: 'POS', 'Gudang', 'Kasir', 'Bayar', etc.",
+    "No indigo, purple, or blue! The primary brand accent is Terracotta (#D35400) indicating a warm cafe setting."
+  ]
+}
