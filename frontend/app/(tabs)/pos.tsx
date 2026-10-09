@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FlatList, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { api, num, rp, useApi } from "@/src/api";
 import { usesNativeTabs } from "@/src/navigation";
+import { SaleTickets } from "@/src/sale-tickets";
 import { Btn, Card, Chips, Header, Icon, Page, rad, Sheet, sp, Stat, StateView, useStyles, useToast, useWide } from "@/src/ui";
 import { makeStyles, useTheme } from "@/src/theme";
 
@@ -16,6 +18,7 @@ export default function POS() {
   const insets = useSafeAreaInsets();
   const wide = useWide();
   const toast = useToast();
+  const router = useRouter();
   const bottomChrome = usesNativeTabs ? insets.bottom : 0;
   const { data: menus, loading, error, reload } = useApi<any[]>("/menus");
   const { data: promos } = useApi<any[]>("/promos?active=true");
@@ -29,6 +32,16 @@ export default function POS() {
   const [closeOpen, setCloseOpen] = useState(false);
   const [summary, setSummary] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const { data: settings } = useApi<any>("/settings");
+  const [taxOn, setTaxOn] = useState(true);
+  const [customer, setCustomer] = useState<any>(null);
+  const [custOpen, setCustOpen] = useState(false);
+  const [custList, setCustList] = useState<any[]>([]);
+  const [cq, setCq] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newPhone, setNewPhone] = useState("");
+  const [orderName, setOrderName] = useState("");
+  const [orderNote, setOrderNote] = useState("");
 
   const active = (menus || []).filter((m) => m.is_active);
   const cats = useMemo(() => [{ label: "Semua", value: "all" }, ...Array.from(new Set(active.map((m) => m.category))).map((c) => ({ label: c, value: c }))], [menus]);
@@ -37,8 +50,34 @@ export default function POS() {
   const subtotal = lines.reduce((a, l) => a + l.price * l.qty, 0);
   const pr = (promos || []).find((x) => x.id === promo);
   const discount = pr ? (pr.discount_type === "percent" ? (subtotal * pr.value) / 100 : Math.min(pr.value, subtotal)) : 0;
-  const total = subtotal - discount;
+  const base = subtotal - discount;
+  const service = settings?.service_percent ? (base * settings.service_percent) / 100 : 0;
+  const taxActive = !!settings?.tax_enabled && taxOn;
+  const tax = taxActive ? ((base + service) * settings.tax_percent) / 100 : 0;
+  const total = Math.round((base + service + tax) * 100) / 100;
   const count = lines.reduce((a, l) => a + l.qty, 0);
+
+  useEffect(() => {
+    if (settings) setTaxOn(!!settings.tax_default_on);
+  }, [settings]);
+
+  const searchCust = async (q: string) => {
+    setCq(q);
+    try {
+      setCustList(await api(`/customers?q=${encodeURIComponent(q)}`));
+    } catch {}
+  };
+  const addCust = async () => {
+    try {
+      const c = await api("/customers", { body: { name: newName, phone: newPhone } });
+      setCustomer(c);
+      setCustOpen(false);
+      setNewName("");
+      setNewPhone("");
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
 
   const add = (id: string, d: number) => setCart((c) => {
     const n = { ...c, [id]: (c[id] || 0) + d };
@@ -49,11 +88,21 @@ export default function POS() {
   const pay = async () => {
     setBusy(true);
     try {
-      const sale = await api("/sales", { body: { items: lines.map((l) => ({ menu_id: l.id, qty: l.qty })), payment_method: method, promo_id: pr?.id ?? null } });
-      setReceipt({ ...sale, cash: method === "Cash" ? num(cash) : 0 });
+      const sale = await api("/sales", {
+        body: {
+          items: lines.map((l) => ({ menu_id: l.id, qty: l.qty })), payment_method: method, promo_id: pr?.id ?? null,
+          customer_id: customer?.id ?? null, customer: customer?.name ?? orderName, apply_tax: taxActive,
+          cash_received: method === "Cash" ? num(cash) : 0, order_note: orderNote,
+        },
+      });
+      setReceipt(sale);
       setCart({});
       setCash("");
       setPromo("none");
+      setCustomer(null);
+      setOrderName("");
+      setOrderNote("");
+      if (settings) setTaxOn(!!settings.tax_default_on);
       setCartOpen(false);
       toast("Transaksi berhasil, stok terpotong otomatis");
     } catch (e: any) {
@@ -98,6 +147,17 @@ export default function POS() {
           <Pressable testID={`cart-plus-${l.id}`} style={p.step} onPress={() => add(l.id, 1)}><Icon name="add" size={20} color={colors.onSurface} /></Pressable>
         </View>
       ))}
+      <Text style={s.section}>Pelanggan & Pesanan</Text>
+      <Pressable testID="pos-customer-button" onPress={() => { setCustOpen(true); searchCust(""); }} style={[p.input, s.row, { justifyContent: "space-between" }]}>
+        <Text style={{ color: customer ? colors.onSurface : colors.muted, fontWeight: customer ? "700" : "400" }}>
+          {customer ? `${customer.name} · ${customer.points} poin` : "Pilih member (dapat poin)"}
+        </Text>
+        {customer ? (
+          <Pressable hitSlop={10} testID="pos-customer-clear" onPress={() => setCustomer(null)}><Icon name="close-circle" size={20} color={colors.muted} /></Pressable>
+        ) : <Icon name="star-outline" size={20} color={colors.brandPrimary} />}
+      </Pressable>
+      {!customer && <TextInput testID="order-name-input" placeholder="Nama pemesan / no. meja" placeholderTextColor={colors.muted} value={orderName} onChangeText={setOrderName} style={p.input} />}
+      <TextInput testID="order-note-input" placeholder="Catatan pesanan (less sugar, dll)" placeholderTextColor={colors.muted} value={orderNote} onChangeText={setOrderNote} style={p.input} />
       <Text style={s.section}>Promo</Text>
       <View style={{ marginHorizontal: -sp.lg }}>
         <Chips testPrefix="promo-chip" value={promo} onChange={setPromo} options={[{ label: "Tanpa Promo", value: "none" }, ...(promos || []).map((x) => ({ label: x.name, value: x.id }))]} />
@@ -111,6 +171,16 @@ export default function POS() {
       )}
       <View style={[s.row, { justifyContent: "space-between" }]}><Text style={s.sub}>Subtotal</Text><Text style={s.title}>{rp(subtotal)}</Text></View>
       {discount > 0 && <View style={[s.row, { justifyContent: "space-between" }]}><Text style={s.sub}>Diskon</Text><Text style={[s.title, { color: colors.success }]}>-{rp(discount)}</Text></View>}
+      {service > 0 && <View style={[s.row, { justifyContent: "space-between" }]}><Text style={s.sub}>Service {settings.service_percent}%</Text><Text style={s.title}>{rp(service)}</Text></View>}
+      {!!settings?.tax_enabled && (
+        <View style={[s.row, { justifyContent: "space-between" }]}>
+          <Pressable testID="pos-tax-toggle" onPress={() => setTaxOn(!taxOn)} style={[p.taxBtn, taxOn && p.taxBtnOn]}>
+            <Icon name={taxOn ? "checkbox" : "square-outline"} size={18} color={taxOn ? colors.onBrandPrimary : colors.onSurface} />
+            <Text style={{ fontWeight: "700", color: taxOn ? colors.onBrandPrimary : colors.onSurface }}>{settings.tax_name} {settings.tax_percent}%</Text>
+          </Pressable>
+          <Text style={s.title} testID="cart-tax-text">{rp(tax)}</Text>
+        </View>
+      )}
       <View style={[s.row, { justifyContent: "space-between" }]}><Text style={s.title}>Total</Text><Text style={[s.value, { fontSize: 22, color: colors.brandPrimary }]} testID="cart-total-text">{rp(total)}</Text></View>
       <Btn title={`Bayar ${rp(total)}`} icon="checkmark-circle-outline" testID="pay-button" loading={busy} disabled={!lines.length} onPress={pay} />
     </View>
@@ -118,7 +188,7 @@ export default function POS() {
 
   return (
     <Page>
-      <Header title="Kasir" subtitle="Point of Sale" right={<Btn small variant="secondary" title="Tutup Kasir" icon="lock-closed-outline" testID="close-register-button" onPress={openClose} />} />
+      <Header title="Kasir" subtitle="Point of Sale" right={<View style={s.row}><Btn small variant="ghost" title="Nota" icon="receipt-outline" testID="pos-history-button" onPress={() => router.push("/m/sales")} /><Btn small variant="secondary" title="Tutup" icon="lock-closed-outline" testID="close-register-button" onPress={openClose} /></View>} />
       <Chips testPrefix="pos-category" value={cat} onChange={setCat} options={cats} />
       <View style={{ flex: 1, flexDirection: "row" }}>
         <View style={{ flex: 1 }}>
@@ -162,26 +232,25 @@ export default function POS() {
         </Pressable>
       )}
       <Sheet visible={cartOpen} onClose={() => setCartOpen(false)} title="Pesanan" testID="cart-sheet">{CartPanel}</Sheet>
-      <Sheet visible={!!receipt} onClose={() => setReceipt(null)} title="Struk" testID="receipt-sheet">
-        {receipt && (
-          <Card>
-            <Text style={[s.title, { textAlign: "center", fontSize: 20 }]}>ROLLOW</Text>
-            <Text style={[s.sub, { textAlign: "center" }]} testID="receipt-number">{receipt.number} · {receipt.cashier_name}</Text>
-            <View style={{ height: 1, backgroundColor: colors.border, marginVertical: sp.md }} />
-            {receipt.items.map((i: any) => (
-              <View key={i.menu_id} style={[s.row, { justifyContent: "space-between" }]}>
-                <Text style={{ color: colors.onSurface }}>{i.qty}x {i.name}</Text>
-                <Text style={{ color: colors.onSurface }}>{rp(i.subtotal)}</Text>
-              </View>
-            ))}
-            <View style={{ height: 1, backgroundColor: colors.border, marginVertical: sp.md }} />
-            {receipt.discount > 0 && <Text style={s.sub}>Diskon ({receipt.promo_name}): -{rp(receipt.discount)}</Text>}
-            <Text style={s.value}>Total {rp(receipt.total)}</Text>
-            <Text style={s.sub}>Bayar: {receipt.payment_method}</Text>
-            {receipt.cash > 0 && <Text style={s.sub}>Tunai {rp(receipt.cash)} · Kembali {rp(receipt.cash - receipt.total)}</Text>}
-          </Card>
-        )}
-        <Btn title="Transaksi Baru" style={{ marginTop: sp.lg }} testID="receipt-done-button" onPress={() => setReceipt(null)} />
+      <Sheet visible={!!receipt} onClose={() => setReceipt(null)} title="Struk & Nota" testID="receipt-sheet">
+        {receipt && <SaleTickets sale={receipt} settings={settings} onVoided={setReceipt} />}
+        <Btn title="Transaksi Baru" variant="secondary" style={{ marginTop: sp.lg }} testID="receipt-done-button" onPress={() => setReceipt(null)} />
+      </Sheet>
+      <Sheet visible={custOpen} onClose={() => setCustOpen(false)} title="Pilih Member" testID="customer-pick-sheet">
+        <TextInput testID="pos-customer-search" placeholder="Cari nama / no. HP" placeholderTextColor={colors.muted} value={cq} onChangeText={searchCust} style={p.input} />
+        <View style={{ gap: sp.sm, marginVertical: sp.md }}>
+          {custList.slice(0, 20).map((c) => (
+            <Card key={c.id} testID={`pos-customer-${c.id}`} onPress={() => { setCustomer(c); setCustOpen(false); }} style={[s.row, { justifyContent: "space-between", paddingVertical: sp.md }]}>
+              <View style={{ flex: 1 }}><Text style={s.title}>{c.name}</Text><Text style={s.sub}>{c.phone || "-"}</Text></View>
+              <Text style={[s.value, { color: colors.brandPrimary }]}>{c.points} poin</Text>
+            </Card>
+          ))}
+          {custList.length === 0 && <Text style={s.muted}>Tidak ditemukan</Text>}
+        </View>
+        <Text style={s.section}>Daftarkan member baru</Text>
+        <TextInput testID="pos-new-customer-name" placeholder="Nama" placeholderTextColor={colors.muted} value={newName} onChangeText={setNewName} style={[p.input, { marginBottom: sp.sm }]} />
+        <TextInput testID="pos-new-customer-phone" placeholder="No. HP" keyboardType="phone-pad" placeholderTextColor={colors.muted} value={newPhone} onChangeText={setNewPhone} style={[p.input, { marginBottom: sp.md }]} />
+        <Btn title="Daftar & Pilih" testID="pos-new-customer-submit" disabled={!newName} onPress={addCust} />
       </Sheet>
       <Sheet visible={closeOpen} onClose={() => setCloseOpen(false)} title="Tutup Kasir" testID="close-register-sheet">
         {!summary ? <StateView loading /> : (
@@ -209,6 +278,8 @@ const useP = makeStyles((c) => ({
   step: { width: 44, height: 44, borderRadius: rad.sm, backgroundColor: c.surfaceTertiary, alignItems: "center", justifyContent: "center" },
   input: { minHeight: 48, borderRadius: rad.md, borderWidth: 1, borderColor: c.border, backgroundColor: c.surfaceSecondary, paddingHorizontal: sp.md, fontSize: 15, color: c.onSurface },
   side: { width: 360, flexGrow: 0, borderLeftWidth: 1, borderLeftColor: c.border, backgroundColor: c.surface },
+  taxBtn: { flexDirection: "row", alignItems: "center", gap: sp.xs, height: 36, paddingHorizontal: sp.md, borderRadius: rad.pill, borderWidth: 1, borderColor: c.border },
+  taxBtnOn: { backgroundColor: c.brandPrimary, borderColor: c.brandPrimary },
   cartBar: { position: "absolute", left: sp.lg, right: sp.lg, height: 56, borderRadius: rad.md, backgroundColor: c.brandPrimary, flexDirection: "row", alignItems: "center", gap: sp.sm, paddingHorizontal: sp.lg },
   cartText: { color: c.onBrandPrimary, fontWeight: "800", fontSize: 16 },
 }));

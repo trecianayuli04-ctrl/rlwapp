@@ -35,10 +35,14 @@ PERM = {
     "purchase": OPS, "purchase_approve": ["owner", "manager"], "purchase_receive": MGMT,
     "finance": ["owner", "finance"], "payroll": ["owner", "finance"],
     "attendance_all": ["owner", "manager", "supervisor", "finance"],
-    "marketing": ["owner", "marketing", "manager"], "users": ["owner"],
+    "marketing": ["owner", "marketing", "manager"], "users": ["owner"], "settings": ["owner", "finance"],
+    "sales_view": ["owner", "manager", "supervisor", "finance", "marketing", "crew"],
+    "sales_void": ["owner", "manager", "supervisor"],
+    "customers": ["owner", "manager", "supervisor", "marketing", "crew"],
 }
 REPORTS = {
     "sales": ["owner", "manager", "supervisor", "finance", "marketing"],
+    "nota": ["owner", "manager", "supervisor", "finance"],
     "inventory": MGMT, "opname": MGMT, "waste": MGMT, "purchasing": ["owner", "manager", "supervisor", "finance"],
     "finance": ["owner", "finance"], "payroll": ["owner", "finance"],
     "attendance": ["owner", "manager", "supervisor", "finance"], "marketing": ["owner", "marketing", "manager"],
@@ -169,6 +173,7 @@ class MenuIn(BaseModel):
     category: str
     price: float
     location: str = "bar"
+    station: str = "bar"  # bar | kitchen -> which order ticket prints the item
     recipe: List[RecipeItem] = []
     is_active: bool = True
 
@@ -176,6 +181,7 @@ class MenuIn(BaseModel):
 class SaleItem(BaseModel):
     menu_id: str
     qty: int
+    note: str = ""
 
 
 class SaleIn(BaseModel):
@@ -183,6 +189,10 @@ class SaleIn(BaseModel):
     payment_method: str
     promo_id: Optional[str] = None
     customer: str = ""
+    customer_id: Optional[str] = None
+    apply_tax: bool = True
+    cash_received: float = 0
+    order_note: str = ""
 
 
 class MoveIn(BaseModel):
@@ -427,7 +437,7 @@ async def list_promos(active: bool = False, u=Depends(current_user)):
         return await active_promos()
     promos = await find("promos")
     for p in promos:
-        sales = await find("sales", {"promo_id": p["id"]})
+        sales = await find("sales", {"promo_id": p["id"], **VALID_SALE})
         p["usage"] = len(sales)
         p["revenue"] = round(sum(s["total"] for s in sales), 2)
         p["discount_given"] = round(sum(s["discount"] for s in sales), 2)
@@ -448,11 +458,82 @@ async def update_promo(pid: str, data: PromoIn, u=Depends(need("marketing"))):
     return {"ok": True}
 
 
+# ---------------- Settings (tax, loyalty, receipt) ----------------
+DEFAULT_SETTINGS = {
+    "tax_enabled": True, "tax_name": "PB1", "tax_percent": 10.0, "tax_default_on": True,
+    "service_percent": 0.0,
+    "loyalty_enabled": True, "points_per_nota": 1, "points_min_purchase": 0, "points_per_amount": 0,
+    "receipt": {"cafe_name": "ROLLOW", "address": "", "phone": "", "header_note": "",
+                "footer_note": "Terima kasih atas kunjungan Anda!", "wifi": "",
+                "show_cashier": True, "show_customer": True, "show_points": True},
+}
+
+
+class SettingsIn(BaseModel):
+    tax_enabled: bool
+    tax_name: str
+    tax_percent: float
+    tax_default_on: bool
+    service_percent: float = 0
+    loyalty_enabled: bool
+    points_per_nota: int
+    points_min_purchase: float = 0
+    points_per_amount: float = 0
+    receipt: dict
+
+
+async def get_settings():
+    d = await db.settings.find_one({"outlet_id": OUTLET}, {"_id": 0})
+    out = {**DEFAULT_SETTINGS, **(d or {})}
+    out["receipt"] = {**DEFAULT_SETTINGS["receipt"], **((d or {}).get("receipt") or {})}
+    return out
+
+
+@api.get("/settings")
+async def read_settings(u=Depends(current_user)):
+    return await get_settings()
+
+
+@api.put("/settings")
+async def write_settings(data: SettingsIn, u=Depends(need("settings"))):
+    await db.settings.update_one({"outlet_id": OUTLET}, {"$set": {**data.model_dump(), "outlet_id": OUTLET,
+                                 "updated_by": u["name"], "updated_at": now().isoformat()}}, upsert=True)
+    return await get_settings()
+
+
+# ---------------- Customers / loyalty ----------------
+class CustomerIn(BaseModel):
+    name: str
+    phone: str = ""
+
+
+@api.get("/customers")
+async def list_customers(q: str = "", u=Depends(need("customers"))):
+    query = {"$or": [{"name": {"$regex": q, "$options": "i"}}, {"phone": {"$regex": q}}]} if q else {}
+    return await find("customers", query, sort="points", limit=200)
+
+
+@api.post("/customers")
+async def create_customer(data: CustomerIn, u=Depends(need("pos"))):
+    if data.phone and await db.customers.find_one({"phone": data.phone, "outlet_id": OUTLET}):
+        raise HTTPException(409, "No. HP sudah terdaftar")
+    return await insert("customers", {**data.model_dump(), "points": 0, "visits": 0, "total_spent": 0})
+
+
+@api.get("/customers/{cid}/history")
+async def customer_history(cid: str, u=Depends(need("customers"))):
+    return await find("sales", {"customer_id": cid}, limit=100)
+
+
 # ---------------- POS / Sales ----------------
+VALID_SALE = {"status": {"$nin": ["void", "cancelled"]}}
+
+
 @api.post("/sales")
 async def create_sale(data: SaleIn, u=Depends(need("pos"))):
     if not data.items:
         raise HTTPException(400, "Keranjang kosong")
+    st = await get_settings()
     imap = await ingredient_map()
     lines, subtotal, hpp_total = [], 0.0, 0.0
     usage = {}
@@ -461,7 +542,8 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
         if not m:
             raise HTTPException(404, "Menu tidak ditemukan")
         hpp = await menu_hpp(m, imap)
-        lines.append({"menu_id": m["id"], "name": m["name"], "qty": it.qty, "price": m["price"],
+        lines.append({"menu_id": m["id"], "name": m["name"], "qty": it.qty, "price": m["price"], "note": it.note,
+                      "station": m.get("station") or m.get("location", "bar"),
                       "hpp": hpp, "subtotal": m["price"] * it.qty})
         subtotal += m["price"] * it.qty
         hpp_total += hpp * it.qty
@@ -474,30 +556,90 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
         if p:
             discount = subtotal * p["value"] / 100 if p["discount_type"] == "percent" else min(p["value"], subtotal)
             promo_name = p["name"]
-    total = round(subtotal - discount, 2)
+    base = subtotal - discount
+    service = round(base * st["service_percent"] / 100, 2) if st["service_percent"] else 0.0
+    tax = round((base + service) * st["tax_percent"] / 100, 2) if (st["tax_enabled"] and data.apply_tax) else 0.0
+    total = round(base + service + tax, 2)
+    cust, points = None, 0
+    if data.customer_id:
+        cust = await db.customers.find_one({"id": data.customer_id}, {"_id": 0})
+        if cust and st["loyalty_enabled"] and total >= st["points_min_purchase"]:
+            points = int(st["points_per_nota"]) + (int(total // st["points_per_amount"]) if st["points_per_amount"] else 0)
     count = await db.sales.count_documents({"date": today(), "outlet_id": OUTLET})
     sale = await insert("sales", {
         "number": f"RLW-{now().strftime('%y%m%d')}-{count + 1:04d}", "items": lines, "subtotal": subtotal,
         "discount": round(discount, 2), "promo_id": data.promo_id if promo_name else None, "promo_name": promo_name,
-        "total": total, "hpp": round(hpp_total, 2), "profit": round(total - hpp_total, 2),
-        "payment_method": data.payment_method, "customer": data.customer,
+        "service": service, "tax": tax, "tax_name": st["tax_name"] if tax else None, "tax_percent": st["tax_percent"] if tax else 0,
+        "total": total, "hpp": round(hpp_total, 2), "profit": round(base - hpp_total, 2),
+        "payment_method": data.payment_method, "cash_received": data.cash_received,
+        "customer": cust["name"] if cust else data.customer, "customer_id": cust["id"] if cust else None,
+        "customer_phone": cust["phone"] if cust else "", "points_earned": points,
+        "points_balance": (cust["points"] + points) if cust else None, "order_note": data.order_note,
+        "time": now().strftime("%H:%M"), "status": "paid",
         "cashier_id": u["id"], "cashier_name": u["name"], "closed": False})
     # recipe -> auto deduct inventory
     for (iid, loc), q in usage.items():
         await move_stock(iid, loc, -q, "penjualan", sale["number"], u)
-    # sale -> finance income
-    await add_finance("income", "Penjualan", total, f"Penjualan {sale['number']} ({data.payment_method})", sale["id"], u)
+    # sale -> finance income (tax collected recorded separately as liability-like income line)
+    await add_finance("income", "Penjualan", round(base + service, 2), f"Penjualan {sale['number']} ({data.payment_method})", sale["id"], u)
+    if tax:
+        await add_finance("income", f"Pajak {st['tax_name']}", tax, f"Pajak {sale['number']}", sale["id"], u)
+    if cust:
+        await db.customers.update_one({"id": cust["id"]}, {"$inc": {"points": points, "visits": 1, "total_spent": total}})
     return sale
 
 
+class VoidIn(BaseModel):
+    kind: str  # void | cancelled
+    reason: str
+
+
+@api.post("/sales/{sid}/void")
+async def void_sale(sid: str, data: VoidIn, u=Depends(need("sales_void"))):
+    s = await db.sales.find_one({"id": sid, "outlet_id": OUTLET}, {"_id": 0})
+    if not s or s.get("status") in ["void", "cancelled"]:
+        raise HTTPException(400, "Nota tidak ditemukan / sudah dibatalkan")
+    if data.kind not in ["void", "cancelled"] or not data.reason.strip():
+        raise HTTPException(400, "Isi alasan pembatalan")
+    # reverse stock
+    movs = await db.stock_movements.find({"ref": s["number"], "type": "penjualan", "outlet_id": OUTLET}, {"_id": 0}).to_list(500)
+    for mv in movs:
+        await move_stock(mv["ingredient_id"], mv["location"], -mv["qty"], f"{data.kind}_penjualan", s["number"], u)
+    # reverse finance
+    fins = await db.finance.find({"ref": sid, "type": "income", "outlet_id": OUTLET}, {"_id": 0}).to_list(10)
+    for f in fins:
+        await add_finance("income", f["category"], -f["amount"], f"{data.kind.upper()} {s['number']}: {data.reason}", sid, u)
+    # reverse loyalty
+    if s.get("customer_id"):
+        await db.customers.update_one({"id": s["customer_id"]}, {"$inc": {"points": -s.get("points_earned", 0), "visits": -1, "total_spent": -s["total"]}})
+    await db.sales.update_one({"id": sid}, {"$set": {"status": data.kind, "void_reason": data.reason,
+                                                    "void_by": u["name"], "void_at": now().isoformat()}})
+    return {"ok": True, "status": data.kind}
+
+
 @api.get("/sales")
-async def list_sales(date: Optional[str] = None, u=Depends(need("pos"))):
-    return await find("sales", {"date": date or today()}, limit=500)
+async def list_sales(date: Optional[str] = None, period: str = "day", status: str = "all", u=Depends(need("sales_view"))):
+    d = date or today()
+    q = {"date": {"$regex": f"^{d if period == 'day' else d[:7]}"}}
+    if status != "all":
+        q["status"] = status if status != "paid" else {"$nin": ["void", "cancelled"]}
+    sales = await find("sales", q, limit=2000)
+    valid = [x for x in sales if x.get("status", "paid") not in ["void", "cancelled"]]
+    by = {}
+    for x in valid:
+        by[x["payment_method"]] = by.get(x["payment_method"], 0) + x["total"]
+    recap = {"nota": len(valid), "void": len([x for x in sales if x.get("status") == "void"]),
+             "cancelled": len([x for x in sales if x.get("status") == "cancelled"]),
+             "subtotal": sum(x["subtotal"] for x in valid), "discount": sum(x["discount"] for x in valid),
+             "tax": sum(x.get("tax", 0) for x in valid), "service": sum(x.get("service", 0) for x in valid),
+             "total": sum(x["total"] for x in valid), "hpp": sum(x["hpp"] for x in valid),
+             "profit": sum(x["profit"] for x in valid), "by_method": by}
+    return {"recap": recap, "sales": sales}
 
 
 @api.get("/pos/summary")
 async def pos_summary(u=Depends(need("pos"))):
-    sales = await find("sales", {"date": today(), "closed": False})
+    sales = await find("sales", {"date": today(), "closed": False, **VALID_SALE})
     by = {}
     for s in sales:
         by[s["payment_method"]] = by.get(s["payment_method"], 0) + s["total"]
@@ -696,7 +838,7 @@ async def dashboard(u=Depends(current_user)):
     r, t, m = u["role"], today(), today()[:7]
     out = {"role": r, "date": t}
     if r in OPS + ["finance", "marketing"]:
-        sales = await find("sales", {"date": t})
+        sales = await find("sales", {"date": t, **VALID_SALE})
         out["sales_today"] = round(sum(s["total"] for s in sales), 2)
         out["trx_today"] = len(sales)
         out["profit_today"] = round(sum(s["profit"] for s in sales), 2)
@@ -735,7 +877,7 @@ async def report(rtype: str, period: str = "day", date: Optional[str] = None, u=
     q = {"date": {"$regex": f"^{p}"}}
     S, rows = {}, []
     if rtype == "sales":
-        sales = await find("sales", q)
+        sales = await find("sales", {**q, **VALID_SALE})
         items = {}
         for s in sales:
             for i in s["items"]:
@@ -745,10 +887,19 @@ async def report(rtype: str, period: str = "day", date: Optional[str] = None, u=
         omzet = sum(s["total"] for s in sales)
         hpp = sum(s["hpp"] for s in sales)
         S = {"Transaksi": len(sales), "Omzet": omzet, "Diskon": sum(s["discount"] for s in sales),
-             "HPP": hpp, "Laba Kotor": omzet - hpp}
+             "Pajak": sum(s.get("tax", 0) for s in sales), "HPP": hpp, "Laba Kotor": omzet - hpp - sum(s.get("tax", 0) for s in sales),
+             "Void/Batal": await db.sales.count_documents({**q, "outlet_id": OUTLET, "status": {"$in": ["void", "cancelled"]}})}
         for pm in set(s["payment_method"] for s in sales):
             S[f"Bayar {pm}"] = sum(s["total"] for s in sales if s["payment_method"] == pm)
         rows = [{"title": k, "subtitle": f"{v['qty']} terjual", "value": v["omzet"]} for k, v in sorted(items.items(), key=lambda x: -x[1]["omzet"])]
+    elif rtype == "nota":
+        allsales = await find("sales", q, limit=5000)
+        valid = [x for x in allsales if x.get("status", "paid") not in ["void", "cancelled"]]
+        S = {"Transaksi": len(valid), "Void/Batal": len(allsales) - len(valid), "Omzet": sum(x["total"] for x in valid),
+             "Pajak": sum(x.get("tax", 0) for x in valid), "Diskon": sum(x["discount"] for x in valid)}
+        rows = [{"title": f"{x['number']} · {x.get('time', '')}", "flag": x.get("status") in ["void", "cancelled"],
+                 "subtitle": f"{x.get('status', 'paid').upper()} · {x['payment_method']} · {x.get('customer') or '-'} · {sum(i['qty'] for i in x['items'])} item · {x['cashier_name']}",
+                 "value": x["total"]} for x in allsales]
     elif rtype == "inventory":
         ings = await list_ingredients(u)
         S = {"Total Bahan": len(ings), "Stok Rendah": len([i for i in ings if i["low"]]),
@@ -781,7 +932,7 @@ async def report(rtype: str, period: str = "day", date: Optional[str] = None, u=
         fin = await find("finance", q, limit=5000)
         inc = sum(f["amount"] for f in fin if f["type"] == "income")
         exp = sum(f["amount"] for f in fin if f["type"] == "expense")
-        sales = await find("sales", q)
+        sales = await find("sales", {**q, **VALID_SALE})
         hpp = sum(s["hpp"] for s in sales)
         S = {"Pemasukan": inc, "Pengeluaran": exp, "Cash Flow Bersih": inc - exp, "HPP Terjual": hpp,
              "Laba Kotor (Omzet-HPP)": sum(s["total"] for s in sales) - hpp}

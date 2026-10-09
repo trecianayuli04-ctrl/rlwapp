@@ -10,6 +10,7 @@ import { useTheme } from "@/src/theme";
 const OPSM: Role[] = ["owner", "manager", "supervisor"];
 const TYPES: { value: string; label: string; roles: Role[] }[] = [
   { value: "sales", label: "Penjualan", roles: ["owner", "manager", "supervisor", "finance", "marketing"] },
+  { value: "nota", label: "Rekap per Nota", roles: [...OPSM, "finance"] },
   { value: "inventory", label: "Inventory", roles: OPSM },
   { value: "opname", label: "Stock Opname", roles: OPSM },
   { value: "waste", label: "Waste", roles: OPSM },

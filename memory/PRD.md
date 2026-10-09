@@ -14,6 +14,13 @@ Integrated cafe management app for ROLLOW (POS, recipes/HPP, inventory per locat
 - Finance manual tx + auto entries; Payroll from attendance -> pay -> expense
 - Attendance clock in/out/izin/sakit/libur/lembur; Marketing promos/campaign + performance
 - Reports: sales, inventory, opname, waste, purchasing, finance/cashflow, payroll, attendance, marketing
+## Iteration 2 (2026-06)
+- Riwayat Nota: recap per nota + overall recap (day/month, status filter); report type "nota"
+- Void & Batalkan pesanan (SPV+ with reason): reverses stock, finance (negative income), loyalty points
+- Customers & loyalty points (points per nota, min purchase, bonus per amount) — settings by Owner/Finance
+- Tax (name, %, default on) + service charge; tax toggle in POS; tax recorded as separate finance income
+- Tickets: customer / bar-checker / kitchen (menu.station), receipt template settings (name, address, phone, header, WiFi, footer, toggles), live preview, print via expo-print (58mm)
 ## Backlog
-- P1: Multi-outlet switcher UI, printable/shareable receipts (Bluetooth printer), shift scheduling, assign opname tasks to crew
+- P0: Direct Bluetooth ESC/POS printing (needs dev build; ticket text lines already 32-col ready)
+- P1: Redeem loyalty points as discount, Multi-outlet switcher UI, printable/shareable receipts (Bluetooth printer), shift scheduling, assign opname tasks to crew
 - P2: Charts on reports, export Excel/PDF, supplier management, split server.py into routers

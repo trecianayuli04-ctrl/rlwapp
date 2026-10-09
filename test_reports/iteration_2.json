@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration-2 regression (new features) complete. Backend: 26/26 pytest cases PASS (100%) in /app/backend/tests/test_rollow_iter2.py covering: GET/PUT /api/settings with RBAC (owner & finance 200, crew & manager 403, PB1 persisted & reverted); menu station field returned and updatable; POST/GET /api/customers with duplicate phone 409, search, finance-no-access 403; POST /api/sales with customer_id + apply_tax true/false + order_note computes tax=10%*(subtotal-discount), item.station bar/kitchen, points_earned uses points_per_nota (=2) with optional per-amount bonus, finance writes BOTH 'Penjualan' + 'Pajak PB1' income lines; POST /api/sales/{id}/void kind=void|cancelled requires reason, crew 403, double-void 400, reverses stock (Gula bar +40g confirmed), reverses customer points & visits & total_spent, appends negative finance income lines; GET /api/sales returns {recap,sales} with recap excluding void/cancelled, filterable by status, by_method; GET /api/reports/nota per-nota rows with status flag and Pajak/Void-Batal in summary; /api/reports/sales includes Pajak + Void/Batal; pos/summary excludes void. Frontend (mobile viewport 390x844): login all roles OK, POS cart sheet renders tax toggle (verified Rp 4.300 PB1 added/removed on toggle, total 47.300↔43.000), order note input, member picker sheet opens with search + existing customers listed + new-customer form (name/phone/submit testIDs present); pay button opens receipt-sheet with dynamic ticket tabs (customer always, bar/kitchen only if items exist for that station) showing cafe name, nota number, time, cashier, pelanggan, PB1 10%, Bayar, Poin didapat, Total poin, WiFi password & footer — all settings-driven fields honored; print-all/print-one buttons visible; Void & Batalkan Pesanan buttons shown for owner/manager/spv with reason input + confirm. POS header 'Nota' button navigates to /m/sales with recap stats (recap-nota, recap-void, recap-total, recap-tax, recap-discount, recap-profit), period/date controls, per-nota list with void flag coloring, detail sheet exposes void flow. Lainnya → Pengaturan Kasir visible only for owner/finance (hidden for crew, verified), all 19 settings testIDs render, live Pratinjau Struk updates in real time, Simpan returns 'Pengaturan disimpan' toast. Pelanggan & Poin screen lists members with visits + spent + points, add & search inputs working. Menu & Resep edit sheet shows station chips 'Potong stok Bar/Kitchen' + 'Print ke Nota Bar/Dapur' allowing station assignment. No red screens, no console errors blocking UI.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "pos cart + customer picker", "issues": ["Nested Sheet layering: when customer-pick-sheet opens on top of cart-sheet with new-customer form expanded, 'Daftar & Pilih' submit button can sit just below the visible viewport on 390x844 forcing user to scroll inside the sheet. Not blocking (scroll works) — consider making the inner sheet a ScrollView with keyboardShouldPersistTaps or shortening section headings."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_rollow_iter2.py",
+    "/app/test_reports/pytest/iter2_results.xml",
+    "/app/backend/tests/test_rollow.py"
+  ],
+  "action_items": [
+    "No functional fixes required for the new features — backend 26/26 and all critical UI flows green.",
+    "Nice-to-have: when customer-pick-sheet is stacked over cart-sheet with new-customer fields expanded, make the inner Sheet content scrollable so 'Daftar & Pilih' never sits below the keyboard/viewport on small devices."
+  ],
+  "critical_code_review_comments": [
+    "server.py still a single 1013-line file; iteration-2 added settings/customers/void but keeps structure clean. Consider splitting into routers before next feature wave.",
+    "VALID_SALE = {'status': {'$nin': ['void','cancelled']}} is spread into queries — good; applied to promo revenue, dashboard, pos_summary, reports/sales, reports/finance. Confirmed excluded voided sales from totals.",
+    "In create_sale, when discount pushes base to 0 but service_percent>0, tax is still computed on service — acceptable; cross-check with tax rule if ever needed.",
+    "void_sale appends negative income lines (good audit trail) rather than deleting the original. This keeps double-entry history but means /finance totals need to sum (not count) — current list_finance/report sums correctly.",
+    "customers endpoint uses PERM['customers'] excluding finance (403). Confirmed matches spec. list customers sort='points' is used by $sort on primary key fine for small outlets, add index when scaling.",
+    "In recap, 'subtotal'/'discount'/'tax' are raw floats not rounded. Visual rounding happens in UI via rp(); for API consumers consider round(…,2). Minor.",
+    "Still using @app.on_event startup/shutdown (deprecated in FastAPI) — migrate to lifespan when convenient."
+  ],
+  "updated_files": ["/app/backend/tests/test_rollow_iter2.py (new)"],
+  "success_rate": {"backend": "100% (26/26 new iter2 cases)", "frontend": "100% of new flows smoke-tested (settings, customers, menu station chips, POS tax toggle, member picker, receipt tickets, nota history + recap, void UI)"},
+  "seed_data_creation": "Created customer 'TEST Pelanggan Loyalti' (081299991111) via tests. Produced one voided sale and one cancelled sale on today's date to validate recap exclusion & report flags.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend URL: EXPO_PUBLIC_BACKEND_URL from /app/frontend/.env. Run iter2 tests with: pytest /app/backend/tests/test_rollow_iter2.py -v -o addopts=''  (pytest.ini enables xdist by default; override needed because iter2 tests share pytest.* state via class order). Credentials in /app/memory/test_credentials.md. Settings endpoint restored to tax_percent=10 points_per_nota=2 after test. Receipt sheet renders ticket tabs dynamically — ticket-tab-bar only exists if at least one item has station=='bar'; test with Es Teh Manis (bar) + French Fries (kitchen) to see all 3 tabs. Receipt uses expo-print browser dialog — do NOT click print-all/print-one in automation; only assert the button exists.",
+  "rca_of_issue": "N/A — all new iteration-2 features implemented and verified without defects."
+}

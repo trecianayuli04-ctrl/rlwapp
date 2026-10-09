@@ -3,6 +3,9 @@ import { Platform } from "react-native";
 export const usesNativeTabs = Platform.OS === "ios" && parseInt(String(Platform.Version), 10) >= 26;
 
 export const MODULES = [
+  { key: "sales", title: "Riwayat Nota", icon: "receipt-outline", perm: "sales_view", route: "/m/sales" },
+  { key: "customers", title: "Pelanggan & Poin", icon: "star-outline", perm: "customers", route: "/m/customers" },
+  { key: "settings", title: "Pengaturan Kasir", icon: "settings-outline", perm: "settings", route: "/m/settings" },
   { key: "attendance", title: "Absensi", icon: "finger-print-outline", perm: "attendance", route: "/m/attendance" },
   { key: "opname", title: "Stock Opname", icon: "clipboard-outline", perm: "opname", route: "/m/opname" },
   { key: "waste", title: "Waste", icon: "trash-bin-outline", perm: "waste", route: "/m/waste" },

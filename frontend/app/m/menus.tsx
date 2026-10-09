@@ -61,7 +61,7 @@ export default function Menus() {
                   <Text style={[s.title, { flex: 1 }]}>{x.name}</Text>
                   <Text style={[s.value, { color: colors.brandPrimary }]}>{rp(x.price)}</Text>
                 </View>
-                <Text style={s.sub}>{x.category} · dari {x.location} · HPP {rp(x.hpp)} · Margin {rp(x.margin)} ({x.price ? Math.round((x.margin / x.price) * 100) : 0}%)</Text>
+                <Text style={s.sub}>{x.category} · stok {x.location} · nota {(x.station || x.location) === "kitchen" ? "Dapur" : "Bar"} · HPP {rp(x.hpp)} · Margin {rp(x.margin)} ({x.price ? Math.round((x.margin / x.price) * 100) : 0}%)</Text>
                 <Text style={s.sub}>Resep: {x.recipe_detail.map((r: any) => `${r.name} ${r.qty}${r.unit}`).join(", ") || "-"}</Text>
               </Card>
             )}
@@ -88,6 +88,7 @@ export default function Menus() {
             <View style={{ marginHorizontal: -sp.lg }}>
               <Chips testPrefix="menu-cat" value={m.category} onChange={(v) => setM({ ...m, category: v })} options={["Minuman", "Makanan", "Snack"].map((c) => ({ label: c, value: c }))} />
               <Chips testPrefix="menu-loc" value={m.location} onChange={(v) => setM({ ...m, location: v })} options={[{ label: "Potong stok Bar", value: "bar" }, { label: "Potong stok Kitchen", value: "kitchen" }]} />
+              <Chips testPrefix="menu-station" value={m.station || m.location} onChange={(v) => setM({ ...m, station: v })} options={[{ label: "Print ke Nota Bar", value: "bar" }, { label: "Print ke Nota Dapur", value: "kitchen" }]} />
             </View>
             <Text style={s.section}>Resep · HPP {rp(hpp)}</Text>
             {m.recipe.map((r: any) => (
@@ -103,7 +104,7 @@ export default function Menus() {
               <View style={{ flex: 1 }}><Field label={`Takaran (${imap[rIng]?.unit ?? "pilih bahan"})`} testID="recipe-qty-input" keyboardType="numeric" value={rQty} onChangeText={setRQty} /></View>
               <Btn title="Tambah" variant="secondary" testID="recipe-add-button" style={{ marginBottom: sp.md }} onPress={addRecipe} />
             </View>
-            <Btn title="Simpan Menu" testID="menu-submit-button" loading={busy} disabled={!m.name || !num(m.price)} onPress={() => save("/menus", m.id, { name: m.name, category: m.category, price: num(m.price), location: m.location, recipe: m.recipe, is_active: m.is_active }, () => setM(null))} />
+            <Btn title="Simpan Menu" testID="menu-submit-button" loading={busy} disabled={!m.name || !num(m.price)} onPress={() => save("/menus", m.id, { name: m.name, category: m.category, price: num(m.price), location: m.location, station: m.station || m.location, recipe: m.recipe, is_active: m.is_active }, () => setM(null))} />
           </>
         )}
       </Sheet>
