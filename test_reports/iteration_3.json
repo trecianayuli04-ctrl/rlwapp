@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration-3 (shared outlet tablet: register sessions + shift handover + kiosk attendance + payroll auto) VERIFIED. Backend 33/33 PASS in /app/backend/tests/test_rollow_iter3.py (10.5s). Covered: POST /api/register/open (crew becomes Shift 1, opening_cash persisted) + 400 when already open; GET /api/register/current (session shape with shifts[] & opening_cash); POST /api/register/handover with wrong PIN -> 400, same holder -> 400, success creates shift #2 with new user_name and ends shift #1; POST /api/sales without session -> 400 ('Kasir belum dibuka'); POST /api/sales with session -> cashier_id/cashier_name = current shift holder (spv, not posting crew), shift_no=2 and session_id set; GET /api/pos/summary returns shifts[] + opening_cash; POST /api/pos/close -> expected_cash computed, register/current -> null, double-close -> 400; GET /api/attendance/staff excludes owner, returns has_pin; POST /api/attendance/kiosk with wrong PIN -> 400, duplicate clock_in -> 400, lembur hours=0 -> 400, clock_in computes late_minutes & is_late vs user shift_start + settings late_tolerance_min (verified: shift 00:00 + tolerance 5 -> is_late=True), lembur returns status=pending; GET /api/attendance/live returns {summary{bertugas,selesai,terlambat,belum_hadir,total,time}, rows[]}; GET /api/attendance?pending=true lists only pending lembur; POST /api/attendance/{id}/decide crew=403, spv approves (status=approved), double-decide=400; GET /api/payroll/preview includes late_penalty exactly = late_count*late_penalty_fixed + late_minutes*late_penalty_per_minute, overtime_hours counts only approved (ot_pending excluded), hourly_pay = hours * hourly_rate, crew=403; PUT /api/users/{id}/pay finance 200 (updates hourly_rate, overtime_rate, shift_start), crew=403; POST /api/payroll uses compute_pay; PUT /api/settings persists late_tolerance_min / late_penalty_fixed / late_penalty_per_minute; PUT /api/users/{id} with pin rejects <4 digits (400), non-digits (400), accepts 4-digit numeric. Frontend (owner, mobile 390x844): Dashboard shows [dashboard-live-attendance] + [dashboard-payroll-estimate] cards; POS tab initially shows [open-register-panel] with [opening-cash-input] + [open-register-button]; after opening, header subtitle shows 'Shift 1 · <name>' and [pos-handover-button] + [pos-kiosk-button] + [pos-live-button] appear. Handover sheet renders 5 [handover-staff-*] + [handover-pin-input] + [handover-submit-button]. Kiosk sheet renders 5 [kiosk-staff-*] + 6 [kiosk-type-*] + [kiosk-pin-input] + [kiosk-submit-button]. Live sheet [live-sheet] opens. Payroll screen /m/payroll shows [payroll-estimate-total] + 5 [payroll-rate-<id>] cards + 5 [payroll-create-<id>] buttons; rate sheet exposes [rate-hourly-input] + [rate-save-button]. Attendance screen /m/attendance shows [overtime-pending-card]. Settings /m/settings has [late-tolerance-input] (and penalty inputs under slightly different testIDs — see minor issue). Users /m/users: tapping [user-item-<id>] opens edit sheet with [user-pin-input] + [user-hourly-input] + [user-shift-input] + [user-overtime-input]. All role-based login still working.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [],
+    "testid_naming_mismatches": [
+      {"screen": "/m/settings", "spec_testID": "late-penalty-fixed-input", "actual_testID": "late-fixed-input", "note": "Input exists & works; just named differently from review spec."},
+      {"screen": "/m/settings", "spec_testID": "late-penalty-per-minute-input", "actual_testID": "late-minute-input", "note": "Input exists & works; just named differently."},
+      {"screen": "/m/users", "spec_testID": "user-edit-<id>", "actual_testID": "user-item-<id>", "note": "Card itself is the tap target (onPress on Card opens edit sheet). No separate edit button."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_rollow_iter3.py",
+    "/app/test_reports/pytest/iter3_results.xml",
+    "/app/backend/tests/test_rollow_iter2.py",
+    "/app/backend/tests/test_rollow.py"
+  ],
+  "action_items": [
+    "OPTIONAL: Rename settings penalty testIDs for consistency: `late-fixed-input` -> `late-penalty-fixed-input` and `late-minute-input` -> `late-penalty-per-minute-input` to match review spec (purely cosmetic — functionality works).",
+    "OPTIONAL: Add testID `user-edit-<id>` as an alias to the user Card onPress target, OR update spec to reference `user-item-<id>` (which is what the code uses).",
+    "No functional fixes required — all new shift/kiosk/payroll flows pass end-to-end."
+  ],
+  "critical_code_review_comments": [
+    "server.py now 1273 lines — split recommended into routers (auth/users, register_pos, attendance, payroll, inventory, reports) before next iteration to stay under 700-line target.",
+    "compute_pay() treats attendance with no explicit 'status' as approved via a.get('status','approved')=='approved' — correct because only lembur gets 'pending' set; still, consider explicit filter `a.get('type')=='lembur'` already applied so OK.",
+    "register_handover updates sess['shifts'] in-place then $set — fine but non-atomic between two tablets. For single shared tablet (per spec) OK; multi-tablet would need an aggregation-pipeline update.",
+    "pos_close computes expected_cash = opening_cash + Cash by_method; non-Cash methods aren't expected in till — correct. Consider also returning per-shift cash expectation for the 'close-shift-N cards & expected cash' UI (close sheet already renders this client-side).",
+    "verify_pin raises 400 for missing PIN with employee name in message — nice UX, used by both /register/handover and /attendance/kiosk.",
+    "attendance_live computes hours live for still-clocked-in users (end=now()); timezone-aware (Asia/Jakarta). Confirmed shift_start returned per row for 'live attendance' display.",
+    "Still using FastAPI @app.on_event (deprecated) — migrate to lifespan (noted in iter2)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_rollow_iter3.py (new, 33 cases)",
+    "/app/test_reports/pytest/iter3_results.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (33/33 new iter3 cases)", "frontend": "100% of required testIDs render & flows open; 3 cosmetic naming mismatches noted"},
+  "seed_data_creation": "Marketing (Dewi) was given hourly_rate=6000, shift_start=00:00 for lateness test, then clocked in via kiosk + 2h lembur approved by SPV. Crew hourly_rate restored to 5500, shift_start=08:00. Settings left at late_tolerance_min=5, late_penalty_fixed=2000, late_penalty_per_minute=500. Any register session opened during testing has been closed — register/current returns null at report time.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend URL = EXPO_PUBLIC_BACKEND_URL. Run: pytest /app/backend/tests/test_rollow_iter3.py -v -o addopts=''  (override xdist). Tests mutate marketing user's pay rate and attendance for today — safe to re-run on same day because kiosk duplicate clock_in is skip-handled and payroll create uses 2025-11 (accepts 409 on re-run). Register session is left CLOSED after suite. Settings left at late_tolerance_min=5 / fixed=2000 / per_minute=500 — main agent may want to revert via PUT /api/settings if needed. Receipt ticket tabs (customer/bar/kitchen) with No. Order / Jam Order / Nama content were visually confirmed in iteration-2 and remain unchanged in this iteration.",
+  "rca_of_issue": "N/A — all iteration-3 features working. Only cosmetic testID naming deltas between review spec and implementation; implementation still exposes equivalent, discoverable testIDs."
+}

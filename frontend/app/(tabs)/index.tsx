@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, rp, useApi } from "@/src/api";
 import { ROLE_LABEL, useAuth } from "@/src/auth";
 import { MODULES, usesNativeTabs } from "@/src/navigation";
+import { LiveAttendance, useLiveAttendance } from "@/src/pos-shift";
 import { Badge, Btn, Card, Header, Icon, Page, sp, Stat, StateView, useStyles, useToast } from "@/src/ui";
 import { useTheme } from "@/src/theme";
 
@@ -18,6 +19,8 @@ export default function Dashboard() {
   const { user, can } = useAuth();
   const { data: d, loading, error, reload } = useApi<any>("/dashboard");
   const [busy, setBusy] = useState(false);
+  const live = useLiveAttendance(can("attendance_all"));
+  const payroll = useApi<any>(can("payroll") ? "/payroll/preview" : null);
   const bottomChrome = usesNativeTabs ? insets.bottom : 0;
 
   const clock = async (type: string) => {
@@ -93,6 +96,24 @@ export default function Dashboard() {
                   </Card>
                 )}
               </View>
+            )}
+
+            {can("attendance_all") && (
+              <Card testID="dashboard-live-attendance">
+                <View style={[s.row, { justifyContent: "space-between", marginBottom: sp.sm }]}>
+                  <Text style={s.title}>Absensi Realtime</Text>
+                  <Btn small variant="ghost" title="Detail" testID="dashboard-attendance-detail" onPress={() => router.push("/m/attendance")} />
+                </View>
+                <LiveAttendance data={live.data} compact />
+                {!!d.pending_overtime && <Text style={[s.sub, { color: colors.warning, marginTop: sp.sm }]}>{d.pending_overtime} pengajuan lembur menunggu ACC</Text>}
+              </Card>
+            )}
+            {can("payroll") && payroll.data && (
+              <Card testID="dashboard-payroll-estimate" onPress={() => router.push("/m/payroll")}>
+                <Text style={s.sub}>Estimasi gaji bulan ini (realtime dari absensi)</Text>
+                <Text style={s.value}>{rp(payroll.data.total)}</Text>
+                <Text style={s.sub}>{payroll.data.hours} jam kerja · potongan telat {rp(payroll.data.late_penalty)}</Text>
+              </Card>
             )}
 
             {d.low_stock && (

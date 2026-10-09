@@ -20,6 +20,12 @@ Integrated cafe management app for ROLLOW (POS, recipes/HPP, inventory per locat
 - Customers & loyalty points (points per nota, min purchase, bonus per amount) — settings by Owner/Finance
 - Tax (name, %, default on) + service charge; tax toggle in POS; tax recorded as separate finance income
 - Tickets: customer / bar-checker / kitchen (menu.station), receipt template settings (name, address, phone, header, WiFi, footer, toggles), live preview, print via expo-print (58mm)
+## Iteration 3 (2026-06)
+- Shared outlet tablet: register sessions (open with opening cash; first cashier = Shift 1), PIN-based shift handover without closing, sales carry shift holder as cashier; close register shows per-shift recap & expected cash
+- Kiosk attendance on POS tab (name + PIN): clock in/out, izin, sakit, libur, lembur (pending ACC by owner/manager/SPV)
+- Realtime attendance (POS sheet + dashboard, 30s polling)
+- Payroll auto: hourly rate x worked hours + base + allowance + approved overtime - late penalty (tolerance, fixed/per-minute in settings); realtime payroll estimate; rate editor (owner/finance)
+- Tickets: Bar/Checker always printed (all items, simple), Dapur kitchen-only simple; customer receipt full
 ## Backlog
 - P0: Direct Bluetooth ESC/POS printing (needs dev build; ticket text lines already 32-col ready)
 - P1: Redeem loyalty points as discount, Multi-outlet switcher UI, printable/shareable receipts (Bluetooth printer), shift scheduling, assign opname tasks to crew

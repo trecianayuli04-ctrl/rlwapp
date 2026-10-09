@@ -39,6 +39,8 @@ PERM = {
     "sales_view": ["owner", "manager", "supervisor", "finance", "marketing", "crew"],
     "sales_void": ["owner", "manager", "supervisor"],
     "customers": ["owner", "manager", "supervisor", "marketing", "crew"],
+    "attendance_live": ["owner", "manager", "supervisor", "finance", "crew"],
+    "overtime_approve": ["owner", "manager", "supervisor"],
 }
 REPORTS = {
     "sales": ["owner", "manager", "supervisor", "finance", "marketing"],
@@ -75,7 +77,10 @@ def make_token(u):
 
 
 def public_user(u):
-    return {k: u.get(k) for k in ["id", "email", "name", "role", "position", "base_salary", "allowance", "is_active", "outlet_id"]}
+    out = {k: u.get(k) for k in ["id", "email", "name", "role", "position", "base_salary", "allowance", "is_active", "outlet_id",
+                                  "hourly_rate", "overtime_rate", "shift_start"]}
+    out["has_pin"] = bool(u.get("pin_hash"))
+    return out
 
 
 async def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer)):
@@ -153,6 +158,18 @@ class UserIn(BaseModel):
     base_salary: float = 0
     allowance: float = 0
     is_active: bool = True
+    hourly_rate: float = 0
+    overtime_rate: float = 0
+    shift_start: str = ""  # HH:MM scheduled start, used for lateness
+    pin: Optional[str] = None
+
+
+class PayRateIn(BaseModel):
+    base_salary: float = 0
+    allowance: float = 0
+    hourly_rate: float = 0
+    overtime_rate: float = 0
+    shift_start: str = ""
 
 
 class IngredientIn(BaseModel):
@@ -329,6 +346,9 @@ async def create_user(data: UserIn, u=Depends(need("users"))):
     d = data.model_dump()
     d["email"] = d["email"].lower()
     d["password_hash"] = hash_pw(d.pop("password"))
+    pin = d.pop("pin")
+    if pin:
+        d["pin_hash"] = hash_pw(pin)
     return public_user(await insert("users", d))
 
 
@@ -336,11 +356,33 @@ async def create_user(data: UserIn, u=Depends(need("users"))):
 async def update_user(uid: str, data: UserIn, u=Depends(need("users"))):
     d = data.model_dump()
     pw = d.pop("password")
+    pin = d.pop("pin")
     d["email"] = d["email"].lower()
     if pw:
         d["password_hash"] = hash_pw(pw)
+    if pin:
+        if not pin.isdigit() or not 4 <= len(pin) <= 6:
+            raise HTTPException(400, "PIN harus 4-6 angka")
+        d["pin_hash"] = hash_pw(pin)
     await db.users.update_one({"id": uid}, {"$set": d})
     return public_user(await db.users.find_one({"id": uid}, {"_id": 0}))
+
+
+@api.put("/users/{uid}/pay")
+async def update_pay(uid: str, data: PayRateIn, u=Depends(need("payroll"))):
+    await db.users.update_one({"id": uid, "outlet_id": OUTLET}, {"$set": data.model_dump()})
+    return public_user(await db.users.find_one({"id": uid}, {"_id": 0}))
+
+
+async def verify_pin(user_id, pin):
+    emp = await db.users.find_one({"id": user_id, "outlet_id": OUTLET}, {"_id": 0})
+    if not emp or not emp.get("is_active", True):
+        raise HTTPException(404, "Karyawan tidak ditemukan")
+    if not emp.get("pin_hash"):
+        raise HTTPException(400, f"{emp['name']} belum punya PIN. Minta Owner mengatur PIN di menu Karyawan.")
+    if not verify_pw(pin or "", emp["pin_hash"]):
+        raise HTTPException(400, "PIN salah")
+    return emp
 
 
 # ---------------- Ingredients & inventory ----------------
@@ -462,6 +504,7 @@ async def update_promo(pid: str, data: PromoIn, u=Depends(need("marketing"))):
 DEFAULT_SETTINGS = {
     "tax_enabled": True, "tax_name": "PB1", "tax_percent": 10.0, "tax_default_on": True,
     "service_percent": 0.0,
+    "late_tolerance_min": 10, "late_penalty_fixed": 0.0, "late_penalty_per_minute": 0.0,
     "loyalty_enabled": True, "points_per_nota": 1, "points_min_purchase": 0, "points_per_amount": 0,
     "receipt": {"cafe_name": "ROLLOW", "address": "", "phone": "", "header_note": "",
                 "footer_note": "Terima kasih atas kunjungan Anda!", "wifi": "",
@@ -479,6 +522,9 @@ class SettingsIn(BaseModel):
     points_per_nota: int
     points_min_purchase: float = 0
     points_per_amount: float = 0
+    late_tolerance_min: int = 10
+    late_penalty_fixed: float = 0
+    late_penalty_per_minute: float = 0
     receipt: dict
 
 
@@ -525,14 +571,84 @@ async def customer_history(cid: str, u=Depends(need("customers"))):
     return await find("sales", {"customer_id": cid}, limit=100)
 
 
-# ---------------- POS / Sales ----------------
+# ---------------- Register session & shifts (shared outlet tablet) ----------------
 VALID_SALE = {"status": {"$nin": ["void", "cancelled"]}}
+
+
+class OpenIn(BaseModel):
+    opening_cash: float = 0
+
+
+class HandoverIn(BaseModel):
+    user_id: str
+    pin: str
+    note: str = ""
+
+
+async def open_session():
+    return await db.register_sessions.find_one({"outlet_id": OUTLET, "status": "open"}, {"_id": 0})
+
+
+async def session_view(sess):
+    if not sess:
+        return None
+    sales = await find("sales", {"session_id": sess["id"], **VALID_SALE}, limit=5000)
+    for sh in sess["shifts"]:
+        mine = [x for x in sales if x.get("shift_no") == sh["no"]]
+        sh["count"] = len(mine)
+        sh["total"] = round(sum(x["total"] for x in mine), 2)
+        by = {}
+        for x in mine:
+            by[x["payment_method"]] = by.get(x["payment_method"], 0) + x["total"]
+        sh["by_method"] = by
+    sess["current"] = sess["shifts"][-1]
+    return sess
+
+
+@api.get("/register/current")
+async def register_current(u=Depends(need("pos"))):
+    return {"session": await session_view(await open_session())}
+
+
+@api.post("/register/open")
+async def register_open(data: OpenIn, u=Depends(need("pos"))):
+    if await open_session():
+        raise HTTPException(400, "Kasir sudah dibuka")
+    t = now()
+    sess = await insert("register_sessions", {"status": "open", "opening_cash": data.opening_cash, "opened_by": u["name"],
+                                              "shifts": [{"no": 1, "user_id": u["id"], "user_name": u["name"],
+                                                          "start": t.strftime("%H:%M"), "start_ts": t.isoformat(), "end": None}]})
+    return {"session": await session_view(sess)}
+
+
+@api.post("/register/handover")
+async def register_handover(data: HandoverIn, u=Depends(need("pos"))):
+    sess = await open_session()
+    if not sess:
+        raise HTTPException(400, "Kasir belum dibuka")
+    emp = await verify_pin(data.user_id, data.pin)
+    cur = sess["shifts"][-1]
+    if cur["user_id"] == emp["id"]:
+        raise HTTPException(400, "Karyawan ini sedang memegang shift")
+    t = now()
+    cur.update({"end": t.strftime("%H:%M"), "end_ts": t.isoformat(), "note": data.note})
+    sess["shifts"].append({"no": cur["no"] + 1, "user_id": emp["id"], "user_name": emp["name"],
+                           "start": t.strftime("%H:%M"), "start_ts": t.isoformat(), "end": None})
+    await db.register_sessions.update_one({"id": sess["id"]}, {"$set": {"shifts": sess["shifts"]}})
+    return {"session": await session_view(sess)}
+
+
+# ---------------- POS / Sales ----------------
 
 
 @api.post("/sales")
 async def create_sale(data: SaleIn, u=Depends(need("pos"))):
     if not data.items:
         raise HTTPException(400, "Keranjang kosong")
+    sess = await open_session()
+    if not sess:
+        raise HTTPException(400, "Kasir belum dibuka. Tekan 'Buka Kasir' dulu.")
+    shift = sess["shifts"][-1]
     st = await get_settings()
     imap = await ingredient_map()
     lines, subtotal, hpp_total = [], 0.0, 0.0
@@ -576,7 +692,8 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
         "customer_phone": cust["phone"] if cust else "", "points_earned": points,
         "points_balance": (cust["points"] + points) if cust else None, "order_note": data.order_note,
         "time": now().strftime("%H:%M"), "status": "paid",
-        "cashier_id": u["id"], "cashier_name": u["name"], "closed": False})
+        "session_id": sess["id"], "shift_no": shift["no"], "input_by": u["name"],
+        "cashier_id": shift["user_id"], "cashier_name": shift["user_name"], "closed": False})
     # recipe -> auto deduct inventory
     for (iid, loc), q in usage.items():
         await move_stock(iid, loc, -q, "penjualan", sale["number"], u)
@@ -639,23 +756,31 @@ async def list_sales(date: Optional[str] = None, period: str = "day", status: st
 
 @api.get("/pos/summary")
 async def pos_summary(u=Depends(need("pos"))):
-    sales = await find("sales", {"date": today(), "closed": False, **VALID_SALE})
+    sess = await session_view(await open_session())
+    sales = await find("sales", {"session_id": sess["id"], **VALID_SALE}, limit=5000) if sess else []
     by = {}
-    for s in sales:
-        by[s["payment_method"]] = by.get(s["payment_method"], 0) + s["total"]
-    return {"count": len(sales), "total": round(sum(s["total"] for s in sales), 2),
-            "discount": round(sum(s["discount"] for s in sales), 2), "by_method": by,
+    for x in sales:
+        by[x["payment_method"]] = by.get(x["payment_method"], 0) + x["total"]
+    return {"count": len(sales), "total": round(sum(x["total"] for x in sales), 2),
+            "discount": round(sum(x["discount"] for x in sales), 2), "by_method": by,
+            "opening_cash": sess["opening_cash"] if sess else 0, "shifts": sess["shifts"] if sess else [],
             "closings": await find("register_closes", {"date": today()})}
 
 
 @api.post("/pos/close")
 async def pos_close(u=Depends(need("pos"))):
+    sess = await open_session()
+    if not sess:
+        raise HTTPException(400, "Kasir belum dibuka")
     summ = await pos_summary(u)
-    if summ["count"] == 0:
-        raise HTTPException(400, "Tidak ada transaksi untuk ditutup")
     summ.pop("closings")
-    rec = await insert("register_closes", {**summ, "user_name": u["name"]})
-    await db.sales.update_many({"date": today(), "closed": False, "outlet_id": OUTLET}, {"$set": {"closed": True}})
+    t = now()
+    shifts = summ["shifts"]
+    shifts[-1].update({"end": t.strftime("%H:%M"), "end_ts": t.isoformat()})
+    rec = await insert("register_closes", {**summ, "session_id": sess["id"], "user_name": u["name"],
+                                           "expected_cash": summ["opening_cash"] + summ["by_method"].get("Cash", 0)})
+    await db.register_sessions.update_one({"id": sess["id"]}, {"$set": {"status": "closed", "shifts": shifts, "closed_by": u["name"], "closed_at": t.isoformat()}})
+    await db.sales.update_many({"session_id": sess["id"]}, {"$set": {"closed": True}})
     return rec
 
 
@@ -770,34 +895,167 @@ async def list_finance(month: Optional[str] = None, u=Depends(need("finance"))):
 
 
 # ---------------- Attendance ----------------
+ATT_TYPES = ["clock_in", "clock_out", "izin", "sakit", "libur", "lembur"]
+
+
+class KioskIn(BaseModel):
+    user_id: str
+    pin: str
+    type: str
+    note: str = ""
+    hours: float = 0
+
+
+def hm_to_min(hm):
+    try:
+        h, m = hm.split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+async def record_attendance(emp, type_, note, hours, by_name):
+    if type_ not in ATT_TYPES:
+        raise HTTPException(400, "Tipe tidak valid")
+    mine = await find("attendance", {"user_id": emp["id"], "date": today()})
+    types = [a["type"] for a in mine]
+    if type_ == "clock_in" and "clock_in" in types:
+        raise HTTPException(400, f"{emp['name']} sudah clock in hari ini")
+    if type_ == "clock_out" and ("clock_in" not in types or "clock_out" in types):
+        raise HTTPException(400, f"{emp['name']} belum clock in / sudah clock out")
+    if type_ == "lembur" and hours <= 0:
+        raise HTTPException(400, "Isi jumlah jam lembur")
+    t = now()
+    extra = {}
+    if type_ == "clock_in":
+        st = await get_settings()
+        sched = hm_to_min(emp.get("shift_start") or "")
+        late = max(0, t.hour * 60 + t.minute - sched) if sched is not None else 0
+        extra = {"late_minutes": late, "is_late": late > st["late_tolerance_min"], "shift_start": emp.get("shift_start")}
+    if type_ == "lembur":
+        extra = {"status": "pending"}
+    return await insert("attendance", {"type": type_, "note": note, "hours": hours, "user_id": emp["id"], "user_name": emp["name"],
+                                       "role": emp["role"], "time": t.strftime("%H:%M"), "ts": t.isoformat(),
+                                       "recorded_by": by_name, **extra})
+
+
 @api.post("/attendance")
 async def create_attendance(data: AttendanceIn, u=Depends(current_user)):
-    if data.type not in ["clock_in", "clock_out", "izin", "sakit", "libur", "lembur"]:
-        raise HTTPException(400, "Tipe tidak valid")
-    mine = await find("attendance", {"user_id": u["id"], "date": today()})
-    types = [a["type"] for a in mine]
-    if data.type == "clock_in" and "clock_in" in types:
-        raise HTTPException(400, "Sudah clock in hari ini")
-    if data.type == "clock_out" and ("clock_in" not in types or "clock_out" in types):
-        raise HTTPException(400, "Belum clock in / sudah clock out")
-    return await insert("attendance", {**data.model_dump(), "user_id": u["id"], "user_name": u["name"],
-                                       "role": u["role"], "time": now().strftime("%H:%M")})
+    return await record_attendance(u, data.type, data.note, data.hours, u["name"])
+
+
+@api.post("/attendance/kiosk")
+async def kiosk_attendance(data: KioskIn, u=Depends(need("pos"))):
+    emp = await verify_pin(data.user_id, data.pin)
+    return await record_attendance(emp, data.type, data.note, data.hours, f"Tab outlet ({u['name']})")
+
+
+@api.get("/attendance/staff")
+async def kiosk_staff(u=Depends(need("pos"))):
+    users = await find("users", {"is_active": True}, sort="name")
+    return [{"id": x["id"], "name": x["name"], "role": x["role"], "position": x.get("position", ""), "has_pin": bool(x.get("pin_hash"))}
+            for x in sorted(users, key=lambda x: x["name"]) if x["role"] != "owner"]
+
+
+@api.get("/attendance/live")
+async def attendance_live(u=Depends(need("attendance_live"))):
+    users = [x for x in await find("users", {"is_active": True}) if x["role"] != "owner"]
+    att = await find("attendance", {"date": today()})
+    t = now()
+    rows = []
+    for emp in sorted(users, key=lambda x: x["name"]):
+        mine = sorted([a for a in att if a["user_id"] == emp["id"]], key=lambda a: a["created_at"])
+        cin = next((a for a in mine if a["type"] == "clock_in"), None)
+        cout = next((a for a in mine if a["type"] == "clock_out"), None)
+        other = next((a for a in mine if a["type"] in ["izin", "sakit", "libur"]), None)
+        hours = 0.0
+        if cin:
+            end = datetime.fromisoformat(cout["created_at"]) if cout else t
+            hours = round((end - datetime.fromisoformat(cin["created_at"])).total_seconds() / 3600, 2)
+        status = "bertugas" if cin and not cout else "selesai" if cout else (other["type"] if other else "belum hadir")
+        rows.append({"user_id": emp["id"], "name": emp["name"], "role": emp["role"], "status": status,
+                     "clock_in": cin["time"] if cin else None, "clock_out": cout["time"] if cout else None,
+                     "late_minutes": cin.get("late_minutes", 0) if cin else 0, "is_late": cin.get("is_late", False) if cin else False,
+                     "hours": hours, "shift_start": emp.get("shift_start") or "",
+                     "overtime_pending": sum(a["hours"] for a in mine if a["type"] == "lembur" and a.get("status") == "pending")})
+    summary = {"bertugas": len([r for r in rows if r["status"] == "bertugas"]), "selesai": len([r for r in rows if r["status"] == "selesai"]),
+               "terlambat": len([r for r in rows if r["is_late"]]), "belum_hadir": len([r for r in rows if r["status"] == "belum hadir"]),
+               "izin_sakit_libur": len([r for r in rows if r["status"] in ["izin", "sakit", "libur"]]),
+               "total": len(rows), "time": t.strftime("%H:%M:%S")}
+    return {"summary": summary, "rows": rows}
+
+
+@api.post("/attendance/{aid}/decide")
+async def decide_overtime(aid: str, data: DecisionIn, u=Depends(need("overtime_approve"))):
+    a = await db.attendance.find_one({"id": aid, "outlet_id": OUTLET}, {"_id": 0})
+    if not a or a["type"] != "lembur" or a.get("status") != "pending":
+        raise HTTPException(400, "Lembur tidak ditemukan / sudah diproses")
+    status = "approved" if data.approve else "rejected"
+    await db.attendance.update_one({"id": aid}, {"$set": {"status": status, "approved_by": u["name"]}})
+    return {"ok": True, "status": status}
 
 
 @api.get("/attendance")
-async def list_attendance(all: bool = False, month: Optional[str] = None, u=Depends(current_user)):
+async def list_attendance(all: bool = False, month: Optional[str] = None, pending: bool = False, u=Depends(current_user)):
     q = {"date": {"$regex": f"^{month or today()[:7]}"}}
-    if not (all and u["role"] in PERM["attendance_all"]):
+    if pending:
+        q = {"type": "lembur", "status": "pending"}
+    if not ((all or pending) and u["role"] in PERM["attendance_all"]):
         q["user_id"] = u["id"]
     return await find("attendance", q, limit=1000)
 
 
-# ---------------- Payroll ----------------
-async def attendance_stats(uid, month):
-    att = await find("attendance", {"user_id": uid, "date": {"$regex": f"^{month}"}})
-    st = {t: len([a for a in att if a["type"] == t]) for t in ["clock_in", "izin", "sakit", "libur"]}
-    st["lembur_hours"] = sum(a.get("hours", 0) for a in att if a["type"] == "lembur")
-    return st
+# ---------------- Payroll (auto from attendance) ----------------
+async def compute_pay(emp, month, st):
+    att = sorted(await find("attendance", {"user_id": emp["id"], "date": {"$regex": f"^{month}"}}), key=lambda a: a["created_at"])
+    t = now()
+    days = {}
+    for a in att:
+        days.setdefault(a["date"], []).append(a)
+    hours, present, late_count, late_minutes, running = 0.0, 0, 0, 0, False
+    for d, recs in days.items():
+        cin = next((a for a in recs if a["type"] == "clock_in"), None)
+        cout = next((a for a in recs if a["type"] == "clock_out"), None)
+        if not cin:
+            continue
+        present += 1
+        if cin.get("is_late"):
+            late_count += 1
+            late_minutes += cin.get("late_minutes", 0)
+        if cout:
+            hours += (datetime.fromisoformat(cout["created_at"]) - datetime.fromisoformat(cin["created_at"])).total_seconds() / 3600
+        elif d == today():
+            running = True
+            hours += (t - datetime.fromisoformat(cin["created_at"])).total_seconds() / 3600
+    hours = round(hours, 2)
+    ot = [a for a in att if a["type"] == "lembur"]
+    ot_ok = sum(a["hours"] for a in ot if a.get("status", "approved") == "approved")
+    ot_pending = sum(a["hours"] for a in ot if a.get("status") == "pending")
+    hourly = emp.get("hourly_rate", 0) or 0
+    ot_rate = emp.get("overtime_rate", 0) or hourly
+    late_penalty = late_count * st["late_penalty_fixed"] + late_minutes * st["late_penalty_per_minute"]
+    hourly_pay = round(hours * hourly, 2)
+    overtime_pay = round(ot_ok * ot_rate, 2)
+    gross = emp.get("base_salary", 0) + emp.get("allowance", 0) + hourly_pay + overtime_pay
+    return {"user_id": emp["id"], "name": emp["name"], "role": emp["role"], "month": month,
+            "base_salary": emp.get("base_salary", 0), "allowance": emp.get("allowance", 0),
+            "hourly_rate": hourly, "overtime_rate": ot_rate, "shift_start": emp.get("shift_start") or "",
+            "hours": hours, "running": running, "hourly_pay": hourly_pay, "overtime_hours": ot_ok,
+            "overtime_pending": ot_pending, "overtime": overtime_pay, "late_count": late_count, "late_minutes": late_minutes,
+            "late_penalty": round(late_penalty, 2),
+            "attendance": {"clock_in": present, **{k: len([a for a in att if a["type"] == k]) for k in ["izin", "sakit", "libur"]},
+                           "lembur_hours": ot_ok},
+            "estimate": round(gross - late_penalty, 2)}
+
+
+@api.get("/payroll/preview")
+async def payroll_preview(month: Optional[str] = None, u=Depends(need("payroll"))):
+    m = month or today()[:7]
+    st = await get_settings()
+    users = [x for x in await find("users", {"is_active": True}) if x["role"] != "owner"]
+    rows = [await compute_pay(e, m, st) for e in sorted(users, key=lambda x: x["name"])]
+    return {"month": m, "rows": rows, "total": round(sum(r["estimate"] for r in rows), 2),
+            "hours": round(sum(r["hours"] for r in rows), 2), "late_penalty": round(sum(r["late_penalty"] for r in rows), 2)}
 
 
 @api.post("/payroll")
@@ -807,14 +1065,10 @@ async def create_payroll(data: PayrollIn, u=Depends(need("payroll"))):
         raise HTTPException(404, "Karyawan tidak ditemukan")
     if await db.payrolls.find_one({"user_id": data.user_id, "month": data.month, "outlet_id": OUTLET}):
         raise HTTPException(409, "Payroll bulan ini sudah dibuat")
-    st = await attendance_stats(data.user_id, data.month)
-    overtime = st["lembur_hours"] * data.overtime_rate
-    total = emp.get("base_salary", 0) + emp.get("allowance", 0) + data.bonus + overtime - data.deduction
-    return await insert("payrolls", {"user_id": emp["id"], "name": emp["name"], "role": emp["role"],
-                                     "month": data.month, "base_salary": emp.get("base_salary", 0),
-                                     "allowance": emp.get("allowance", 0), "bonus": data.bonus,
-                                     "overtime": overtime, "deduction": data.deduction, "attendance": st,
-                                     "total": round(total, 2), "status": "draft"})
+    c = await compute_pay(emp, data.month, await get_settings())
+    total = c["estimate"] + data.bonus - data.deduction
+    c.pop("estimate")
+    return await insert("payrolls", {**c, "bonus": data.bonus, "deduction": data.deduction, "total": round(total, 2), "status": "draft"})
 
 
 @api.get("/payroll")
@@ -856,6 +1110,8 @@ async def dashboard(u=Depends(current_user)):
         out["finance_month"] = {"income": round(inc, 2), "expense": round(exp, 2), "net": round(inc - exp, 2)}
     if r in PERM["marketing"]:
         out["active_promos"] = len(await active_promos())
+    if r in PERM["overtime_approve"]:
+        out["pending_overtime"] = await db.attendance.count_documents({"type": "lembur", "status": "pending", "outlet_id": OUTLET})
     mine = await find("attendance", {"user_id": u["id"], "date": t})
     out["my_attendance"] = [a["type"] for a in mine]
     return out
@@ -974,6 +1230,10 @@ async def seed():
             role = "supervisor" if key == "spv" else key
             await insert("users", {"email": email, "password_hash": hash_pw(pw), "name": name, "role": role,
                                    "position": name.split()[1], "base_salary": sal, "allowance": 500000, "is_active": True})
+    await db.users.update_many({"pin_hash": {"$exists": False}}, {"$set": {"pin_hash": hash_pw("1234")}})
+    await db.users.update_many({"email": "crew@rollow.id", "hourly_rate": {"$exists": False}},
+                               {"$set": {"hourly_rate": 15000, "overtime_rate": 20000, "shift_start": "08:00", "base_salary": 0}})
+    await db.users.update_many({"shift_start": {"$exists": False}}, {"$set": {"shift_start": "08:00", "hourly_rate": 0, "overtime_rate": 0}})
     if await db.ingredients.count_documents({}) == 0:
         ings = [("Gula", "gram", 15, 5000, [8000, 1700, 0]), ("Teh Celup", "pcs", 300, 50, [200, 40, 0]),
                 ("Kopi Arabika", "gram", 250, 1000, [3000, 800, 0]), ("Susu UHT", "ml", 20, 3000, [10000, 2000, 0]),

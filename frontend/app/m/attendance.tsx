@@ -15,6 +15,17 @@ export default function Attendance() {
   const { can } = useAuth();
   const [scope, setScope] = useState("me");
   const { data, loading, error, reload } = useApi<any[]>(`/attendance?all=${scope === "all"}`);
+  const pending = useApi<any[]>(can("overtime_approve") ? "/attendance?pending=true" : null);
+  const decide = async (id: string, approve: boolean) => {
+    try {
+      await api(`/attendance/${id}/decide`, { body: { approve } });
+      toast(approve ? "Lembur di-ACC, masuk ke gaji" : "Lembur ditolak");
+      pending.reload();
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
   const [form, setForm] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [hours, setHours] = useState("");
@@ -46,6 +57,18 @@ export default function Attendance() {
         contentContainerStyle={[s.list, { paddingBottom: insets.bottom + sp.xl }]}
         ListHeaderComponent={
           <View style={{ gap: sp.md }}>
+            {(pending.data || []).length > 0 && (
+              <Card testID="overtime-pending-card">
+                <Text style={[s.title, { marginBottom: sp.sm }]}>Lembur menunggu ACC ({pending.data!.length})</Text>
+                {pending.data!.map((a) => (
+                  <View key={a.id} style={[s.row, { justifyContent: "space-between", paddingVertical: 4 }]}>
+                    <Text style={[s.sub, { flex: 1 }]}>{a.user_name} · {a.date} · {a.hours} jam {a.note ? `· ${a.note}` : ""}</Text>
+                    <Btn small title="ACC" variant="success" testID={`overtime-approve-${a.id}`} onPress={() => decide(a.id, true)} />
+                    <Btn small title="Tolak" variant="ghost" testID={`overtime-reject-${a.id}`} onPress={() => decide(a.id, false)} />
+                  </View>
+                ))}
+              </Card>
+            )}
             <View style={s.row}>
               <Btn title="Clock In" icon="log-in-outline" style={{ flex: 1 }} testID="att-clock-in-button" loading={busy} onPress={() => send("clock_in")} />
               <Btn title="Clock Out" icon="log-out-outline" variant="secondary" style={{ flex: 1 }} testID="att-clock-out-button" loading={busy} onPress={() => send("clock_out")} />
@@ -65,7 +88,7 @@ export default function Attendance() {
               <Text style={s.title}>{a.user_name}</Text>
               <Text style={s.sub}>{a.date} · {a.time}{a.hours ? ` · ${a.hours} jam` : ""}{a.note ? ` · ${a.note}` : ""}</Text>
             </View>
-            <Badge label={LABEL[a.type]} tone={a.type === "clock_in" ? "success" : a.type === "lembur" ? "brand" : a.type === "clock_out" ? "info" : "warning"} />
+            <Badge label={`${LABEL[a.type]}${a.type === "lembur" && a.status ? ` · ${a.status === "pending" ? "MENUNGGU" : a.status === "approved" ? "ACC" : "DITOLAK"}` : ""}${a.is_late ? " · TELAT" : ""}`} tone={a.is_late ? "error" : a.type === "clock_in" ? "success" : a.type === "lembur" ? "brand" : a.type === "clock_out" ? "info" : "warning"} />
           </Card>
         )}
       />

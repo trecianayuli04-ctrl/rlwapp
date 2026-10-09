@@ -26,7 +26,7 @@ export default function Settings() {
   const [preview, setPreview] = useState<"customer" | "bar" | "kitchen">("customer");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (data) setF({ ...data, tax_percent: String(data.tax_percent), service_percent: String(data.service_percent), points_per_nota: String(data.points_per_nota), points_min_purchase: String(data.points_min_purchase), points_per_amount: String(data.points_per_amount) });
+    if (data) setF({ ...data, tax_percent: String(data.tax_percent), service_percent: String(data.service_percent), points_per_nota: String(data.points_per_nota), points_min_purchase: String(data.points_min_purchase), points_per_amount: String(data.points_per_amount), late_tolerance_min: String(data.late_tolerance_min), late_penalty_fixed: String(data.late_penalty_fixed), late_penalty_per_minute: String(data.late_penalty_per_minute) });
   }, [data]);
   const set = (k: string) => (v: any) => setF({ ...f, [k]: v });
   const setR = (k: string) => (v: any) => setF({ ...f, receipt: { ...f.receipt, [k]: v } });
@@ -34,7 +34,7 @@ export default function Settings() {
   const save = async () => {
     setBusy(true);
     try {
-      await api("/settings", { method: "PUT", body: { ...f, tax_percent: num(f.tax_percent), service_percent: num(f.service_percent), points_per_nota: Math.round(num(f.points_per_nota)), points_min_purchase: num(f.points_min_purchase), points_per_amount: num(f.points_per_amount) } });
+      await api("/settings", { method: "PUT", body: { ...f, tax_percent: num(f.tax_percent), service_percent: num(f.service_percent), points_per_nota: Math.round(num(f.points_per_nota)), points_min_purchase: num(f.points_min_purchase), points_per_amount: num(f.points_per_amount), late_tolerance_min: Math.round(num(f.late_tolerance_min)), late_penalty_fixed: num(f.late_penalty_fixed), late_penalty_per_minute: num(f.late_penalty_per_minute) } });
       toast("Pengaturan disimpan");
       reload();
     } catch (e: any) {
@@ -71,6 +71,15 @@ export default function Settings() {
             <Field label="Poin per nota" testID="points-per-nota-input" keyboardType="numeric" value={f.points_per_nota} onChangeText={set("points_per_nota")} />
             <Field label="Minimal belanja agar dapat poin (Rp)" testID="points-min-input" keyboardType="numeric" value={f.points_min_purchase} onChangeText={set("points_min_purchase")} />
             <Field label="Bonus +1 poin setiap kelipatan (Rp, 0 = nonaktif)" testID="points-amount-input" keyboardType="numeric" value={f.points_per_amount} onChangeText={set("points_per_amount")} />
+          </Card>
+          <Card>
+            <Text style={[s.title, { marginBottom: sp.md }]}>Absensi & Keterlambatan</Text>
+            <Field label="Toleransi telat (menit)" testID="late-tolerance-input" keyboardType="numeric" value={f.late_tolerance_min} onChangeText={set("late_tolerance_min")} />
+            <View style={s.row}>
+              <View style={{ flex: 1 }}><Field label="Potongan per kali telat (Rp)" testID="late-fixed-input" keyboardType="numeric" value={f.late_penalty_fixed} onChangeText={set("late_penalty_fixed")} /></View>
+              <View style={{ flex: 1 }}><Field label="Potongan per menit telat (Rp)" testID="late-minute-input" keyboardType="numeric" value={f.late_penalty_per_minute} onChangeText={set("late_penalty_per_minute")} /></View>
+            </View>
+            <Text style={s.sub}>Telat dihitung dari jam masuk tiap karyawan (atur di Payroll → Atur Gaji). Bila melewati toleransi, gaji otomatis terpotong.</Text>
           </Card>
           <Card>
             <Text style={[s.title, { marginBottom: sp.md }]}>Tampilan Struk</Text>

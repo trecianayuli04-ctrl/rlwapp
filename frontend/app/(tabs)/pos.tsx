@@ -6,6 +6,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, num, rp, useApi } from "@/src/api";
 import { usesNativeTabs } from "@/src/navigation";
 import { SaleTickets } from "@/src/sale-tickets";
+import { useAuth } from "@/src/auth";
+import { Handover, KioskAttendance, LiveAttendance, OpenRegister, useLiveAttendance } from "@/src/pos-shift";
 import { Btn, Card, Chips, Header, Icon, Page, rad, Sheet, sp, Stat, StateView, useStyles, useToast, useWide } from "@/src/ui";
 import { makeStyles, useTheme } from "@/src/theme";
 
@@ -33,6 +35,11 @@ export default function POS() {
   const [summary, setSummary] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const { data: settings } = useApi<any>("/settings");
+  const { user } = useAuth();
+  const reg = useApi<any>("/register/current");
+  const session = reg.data?.session;
+  const live = useLiveAttendance();
+  const [panel, setPanel] = useState<"handover" | "kiosk" | "live" | null>(null);
   const [taxOn, setTaxOn] = useState(true);
   const [customer, setCustomer] = useState<any>(null);
   const [custOpen, setCustOpen] = useState(false);
@@ -126,6 +133,7 @@ export default function POS() {
       await api("/pos/close", { body: {} });
       toast("Kasir ditutup");
       setCloseOpen(false);
+      reg.reload();
     } catch (e: any) {
       toast(e.message, "error");
     } finally {
@@ -188,7 +196,20 @@ export default function POS() {
 
   return (
     <Page>
-      <Header title="Kasir" subtitle="Point of Sale" right={<View style={s.row}><Btn small variant="ghost" title="Nota" icon="receipt-outline" testID="pos-history-button" onPress={() => router.push("/m/sales")} /><Btn small variant="secondary" title="Tutup" icon="lock-closed-outline" testID="close-register-button" onPress={openClose} /></View>} />
+      <Header
+        title="Kasir"
+        subtitle={session ? `Shift ${session.current.no} · ${session.current.user_name} · sejak ${session.current.start}` : "Kasir belum dibuka"}
+        right={<View style={s.row}><Btn small variant="ghost" title="Nota" icon="receipt-outline" testID="pos-history-button" onPress={() => router.push("/m/sales")} />{session && <Btn small variant="secondary" title="Tutup" icon="lock-closed-outline" testID="close-register-button" onPress={openClose} />}</View>}
+      />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={[s.chipRow, { paddingTop: sp.sm, paddingBottom: 0 }]}>
+        {session && <Btn small variant="ghost" title="Pindah Shift" icon="swap-horizontal" testID="pos-handover-button" onPress={() => setPanel("handover")} />}
+        <Btn small variant="ghost" title="Absen" icon="finger-print-outline" testID="pos-kiosk-button" onPress={() => setPanel("kiosk")} />
+        <Btn small variant="ghost" title={`Live Absen · ${live.data?.summary.bertugas ?? 0} bertugas`} icon="pulse-outline" testID="pos-live-button" onPress={() => { live.reload(); setPanel("live"); }} />
+      </ScrollView>
+      {reg.data && !session ? (
+        <OpenRegister userName={user?.name ?? ""} onOpened={() => reg.reload()} />
+      ) : (
+      <>
       <Chips testPrefix="pos-category" value={cat} onChange={setCat} options={cats} />
       <View style={{ flex: 1, flexDirection: "row" }}>
         <View style={{ flex: 1 }}>
@@ -223,7 +244,9 @@ export default function POS() {
           </ScrollView>
         )}
       </View>
-      {!wide && count > 0 && (
+      </>
+      )}
+      {!wide && count > 0 && session && (
         <Pressable testID="open-cart-button" onPress={() => setCartOpen(true)} style={[p.cartBar, { bottom: bottomChrome + sp.lg }]}>
           <Icon name="cart" size={22} color={colors.onBrandPrimary} />
           <Text style={p.cartText}>{count} item</Text>
@@ -252,13 +275,30 @@ export default function POS() {
         <TextInput testID="pos-new-customer-phone" placeholder="No. HP" keyboardType="phone-pad" placeholderTextColor={colors.muted} value={newPhone} onChangeText={setNewPhone} style={[p.input, { marginBottom: sp.md }]} />
         <Btn title="Daftar & Pilih" testID="pos-new-customer-submit" disabled={!newName} onPress={addCust} />
       </Sheet>
+      <Sheet visible={panel === "handover"} onClose={() => setPanel(null)} title="Pindah Shift" testID="handover-sheet">
+        {session && <Handover session={session} onDone={() => { reg.reload(); setPanel(null); }} />}
+      </Sheet>
+      <Sheet visible={panel === "kiosk"} onClose={() => setPanel(null)} title="Absen Karyawan" testID="kiosk-sheet">
+        <KioskAttendance onDone={live.reload} />
+      </Sheet>
+      <Sheet visible={panel === "live"} onClose={() => setPanel(null)} title="Absensi Realtime" testID="live-sheet">
+        <LiveAttendance data={live.data} />
+      </Sheet>
       <Sheet visible={closeOpen} onClose={() => setCloseOpen(false)} title="Tutup Kasir" testID="close-register-sheet">
         {!summary ? <StateView loading /> : (
           <View style={{ gap: sp.md }}>
             <View style={s.wrap}>
               <Stat label="Transaksi" value={String(summary.count)} testID="close-count" />
               <Stat label="Total" value={rp(summary.total)} tone="brand" testID="close-total" />
+              <Stat label="Kas seharusnya" value={rp(summary.opening_cash + (summary.by_method.Cash || 0))} testID="close-expected-cash" />
             </View>
+            <Text style={s.sub}>Modal awal {rp(summary.opening_cash)}</Text>
+            {summary.shifts.map((sh: any) => (
+              <Card key={sh.no} testID={`close-shift-${sh.no}`}>
+                <Text style={s.title}>Shift {sh.no} · {sh.user_name}</Text>
+                <Text style={s.sub}>{sh.start} - {sh.end || "sekarang"} · {sh.count} nota · {rp(sh.total)}</Text>
+              </Card>
+            ))}
             {Object.entries(summary.by_method).map(([k, v]: any) => (
               <View key={k} style={[s.row, { justifyContent: "space-between" }]}><Text style={s.sub}>{k}</Text><Text style={s.title}>{rp(v)}</Text></View>
             ))}

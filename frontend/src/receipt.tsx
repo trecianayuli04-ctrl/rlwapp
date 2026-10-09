@@ -16,28 +16,29 @@ const line = (c = "-") => c.repeat(W);
 const wrap = (t: string) => (t || "").split("\n").flatMap((p) => p.match(new RegExp(`.{1,${W}}`, "g")) || [""]);
 
 export type Station = "customer" | "bar" | "kitchen";
-export const STATION_LABEL: Record<Station, string> = { customer: "Nota Customer", bar: "Nota Bar / Checker", kitchen: "Nota Dapur" };
+export const STATION_LABEL: Record<Station, string> = { customer: "Customer", bar: "Bar/Checker", kitchen: "Dapur" };
 
 export function ticketLines(sale: any, settings: any, station: Station): string[] {
   const r = settings?.receipt || {};
   const when = `${sale.date} ${sale.time || ""}`;
   const voided = sale.status === "void" || sale.status === "cancelled";
   if (station !== "customer") {
-    const items = sale.items.filter((i: any) => (i.station || "bar") === station);
-    if (!items.length) return [];
+    // Bar/Checker = full order (checker verifies everything, bar items first); Dapur = kitchen items only
+    const bar = sale.items.filter((i: any) => (i.station || "bar") === "bar");
+    const kit = sale.items.filter((i: any) => i.station === "kitchen");
+    const fmt = (i: any) => [`${i.qty} x ${i.name}`, ...(i.note ? wrap(`  > ${i.note}`) : [])];
+    if (station === "kitchen" && !kit.length) return [];
     return [
-      center(station === "bar" ? "*** BAR / CHECKER ***" : "*** DAPUR ***"),
-      center(r.cafe_name || "ROLLOW"),
+      center(station === "bar" ? "BAR / CHECKER" : "DAPUR"),
       line("="),
-      lr("No", sale.number),
-      lr("Waktu", when),
+      lr("No. Order", sale.number),
+      lr("Jam Order", sale.time || ""),
       lr("Nama", sale.customer || "-"),
-      lr("Kasir", sale.cashier_name),
-      ...(sale.order_note ? wrap(`Catatan: ${sale.order_note}`) : []),
       line(),
-      ...items.flatMap((i: any) => [`${i.qty} x ${i.name}`, ...(i.note ? wrap(`  > ${i.note}`) : [])]),
-      line(),
-      lr("Total item", String(items.reduce((a: number, i: any) => a + i.qty, 0))),
+      ...(station === "kitchen"
+        ? kit.flatMap(fmt)
+        : [...(kit.length && bar.length ? ["[BAR]"] : []), ...bar.flatMap(fmt), ...(kit.length ? ["[DAPUR]", ...kit.flatMap(fmt)] : [])]),
+      ...(sale.order_note ? [line(), ...wrap(`Catatan: ${sale.order_note}`)] : []),
       ...(voided ? [line("="), center(`DIBATALKAN (${sale.status.toUpperCase()})`)] : []),
     ];
   }
@@ -71,7 +72,7 @@ export function ticketLines(sale: any, settings: any, station: Station): string[
 }
 
 export const stationsFor = (sale: any): Station[] =>
-  (["customer", "bar", "kitchen"] as Station[]).filter((s) => s === "customer" || sale.items.some((i: any) => (i.station || "bar") === s));
+  (["customer", "bar", "kitchen"] as Station[]).filter((s) => s !== "kitchen" || sale.items.some((i: any) => i.station === "kitchen"));
 
 export async function printTickets(sale: any, settings: any, stations: Station[]) {
   const pages = stations
