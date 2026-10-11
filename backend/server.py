@@ -1359,10 +1359,6 @@ async def seed():
                                 "description": "Diskon 10% semua menu", "budget": 0, "is_active": True})
 
 
-from ext_routes import router as ext_router, seed_ext  # noqa: E402
-
-api.include_router(ext_router)
-app.add_event_handler("startup", seed_ext)
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 logging.basicConfig(level=logging.INFO)
