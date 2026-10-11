@@ -289,3 +289,5 @@
 ##     file: "frontend/src/sale-tickets.tsx, frontend/src/receipt.tsx"
 ##     working: "NA"
 ##     needs_retesting: true
+##     -agent: "main"
+##     -message: "Fitur baru: Input Item Manual di POS biasa (terpisah dari pesanan eksternal). Backend: SaleItem.menu_id opsional + name/price; item manual tidak potong stok & HPP=0, tetap kena pajak/service. Frontend: tombol 'Item Manual' di action bar + keranjang, sheet input nama/qty/harga. Terverifikasi API: manual-only=27500 (dgn pajak), campuran menu+manual=35200, nama kosong->400. UI sheet render benar."

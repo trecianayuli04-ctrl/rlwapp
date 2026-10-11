@@ -40,3 +40,4 @@ Integrated cafe management app for ROLLOW (POS, recipes/HPP, inventory per locat
 - Finance summary /api/finance/summary: omzet gross/net/refund/hpp, by_method, by_channel, alokasi kantong vs realisasi, expenses per kategori
 - Audit viewer /api/audit + /m/audit (filter entity/date/user); mode stok detailed/simple (POS deduct ke gudang saat simple); QRIS/MDR settings UI
 - Payroll fix: slip pakai komponen (snapshot), UI pilih komponen (bug bonus/deduction lama teratasi)
+- Input item manual di POS biasa (nama+qty+harga, bukan katalog, tidak potong stok, HPP 0, kena pajak/service) — SaleItem.menu_id opsional + name/price; tombol "Item Manual" di action bar & keranjang

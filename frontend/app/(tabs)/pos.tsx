@@ -9,7 +9,7 @@ import { SaleTickets } from "@/src/sale-tickets";
 import { PettyCashSheet, ExternalOrderSheet } from "@/src/pos-extra";
 import { useAuth } from "@/src/auth";
 import { Handover, KioskAttendance, LiveAttendance, OpenRegister, useLiveAttendance } from "@/src/pos-shift";
-import { Btn, Card, Chips, Header, Icon, Page, rad, Sheet, sp, Stat, StateView, useStyles, useToast, useWide } from "@/src/ui";
+import { Btn, Card, Chips, Field, Header, Icon, Page, rad, Sheet, sp, Stat, StateView, useStyles, useToast, useWide } from "@/src/ui";
 import { makeStyles, useTheme } from "@/src/theme";
 
 const METHODS = ["Cash", "QRIS", "Transfer", "Debit"].map((m) => ({ label: m, value: m }));
@@ -27,6 +27,11 @@ export default function POS() {
   const { data: promos } = useApi<any[]>("/promos?active=true");
   const [cat, setCat] = useState("all");
   const [cart, setCart] = useState<Record<string, number>>({});
+  const [manuals, setManuals] = useState<any[]>([]);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [mName, setMName] = useState("");
+  const [mQty, setMQty] = useState("1");
+  const [mPrice, setMPrice] = useState("");
   const [method, setMethod] = useState("Cash");
   const [promo, setPromo] = useState("none");
   const [cash, setCash] = useState("");
@@ -57,7 +62,8 @@ export default function POS() {
   const cats = useMemo(() => [{ label: "Semua", value: "all" }, ...Array.from(new Set(active.map((m) => m.category))).map((c) => ({ label: c, value: c }))], [menus]);
   const shown = cat === "all" ? active : active.filter((m) => m.category === cat);
   const lines = active.filter((m) => cart[m.id]).map((m) => ({ ...m, qty: cart[m.id] }));
-  const subtotal = lines.reduce((a, l) => a + l.price * l.qty, 0);
+  const manualSubtotal = manuals.reduce((a, m) => a + m.price * m.qty, 0);
+  const subtotal = lines.reduce((a, l) => a + l.price * l.qty, 0) + manualSubtotal;
   const pr = (promos || []).find((x) => x.id === promo);
   const methodOptions = (payMethods && payMethods.length ? payMethods.map((m) => ({ label: m.name, value: m.name })) : METHODS);
   const discount = pr ? (pr.discount_type === "percent" ? (subtotal * pr.value) / 100 : Math.min(pr.value, subtotal)) : 0;
@@ -66,7 +72,7 @@ export default function POS() {
   const taxActive = !!settings?.tax_enabled && taxOn;
   const tax = taxActive ? ((base + service) * settings.tax_percent) / 100 : 0;
   const total = Math.round((base + service + tax) * 100) / 100;
-  const count = lines.reduce((a, l) => a + l.qty, 0);
+  const count = lines.reduce((a, l) => a + l.qty, 0) + manuals.reduce((a, m) => a + m.qty, 0);
 
   useEffect(() => {
     if (settings) setTaxOn(!!settings.tax_default_on);
@@ -101,13 +107,14 @@ export default function POS() {
     try {
       const sale = await api("/sales", {
         body: {
-          items: lines.map((l) => ({ menu_id: l.id, qty: l.qty })), payment_method: method, promo_id: pr?.id ?? null,
+          items: [...lines.map((l) => ({ menu_id: l.id, qty: l.qty })), ...manuals.map((m) => ({ menu_id: null, name: m.name, qty: m.qty, price: m.price }))], payment_method: method, promo_id: pr?.id ?? null,
           customer_id: customer?.id ?? null, customer: customer?.name ?? orderName, apply_tax: taxActive,
           cash_received: method === "Cash" ? num(cash) : 0, order_note: orderNote,
         },
       });
       setReceipt(sale);
       setCart({});
+      setManuals([]);
       setCash("");
       setPromo("none");
       setCustomer(null);
@@ -159,6 +166,17 @@ export default function POS() {
           <Pressable testID={`cart-plus-${l.id}`} style={p.step} onPress={() => add(l.id, 1)}><Icon name="add" size={20} color={colors.onSurface} /></Pressable>
         </View>
       ))}
+      {manuals.map((m, i) => (
+        <View key={`manual-${i}`} style={[s.row, { justifyContent: "space-between" }]}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.title} numberOfLines={1}>{m.name} <Text style={[s.sub, { fontSize: 11 }]}>(manual)</Text></Text>
+            <Text style={s.sub}>{rp(m.price * m.qty)}</Text>
+          </View>
+          <Pressable testID={`manual-remove-${i}`} style={p.step} onPress={() => setManuals((ms) => ms.filter((_, x) => x !== i))}><Icon name="trash-outline" size={20} color={colors.error} /></Pressable>
+          <Text style={[s.value, { minWidth: 24, textAlign: "center" }]}>{m.qty}</Text>
+        </View>
+      ))}
+      <Btn small variant="ghost" title="Input Manual (item bebas)" icon="create-outline" testID="pos-manual-item-button" onPress={() => setManualOpen(true)} />
       <Text style={s.section}>Pelanggan & Pesanan</Text>
       <Pressable testID="pos-customer-button" onPress={() => { setCustOpen(true); searchCust(""); }} style={[p.input, s.row, { justifyContent: "space-between" }]}>
         <Text style={{ color: customer ? colors.onSurface : colors.muted, fontWeight: customer ? "700" : "400" }}>
@@ -194,7 +212,7 @@ export default function POS() {
         </View>
       )}
       <View style={[s.row, { justifyContent: "space-between" }]}><Text style={s.title}>Total</Text><Text style={[s.value, { fontSize: 22, color: colors.brandPrimary }]} testID="cart-total-text">{rp(total)}</Text></View>
-      <Btn title={`Bayar ${rp(total)}`} icon="checkmark-circle-outline" testID="pay-button" loading={busy} disabled={!lines.length} onPress={pay} />
+      <Btn title={`Bayar ${rp(total)}`} icon="checkmark-circle-outline" testID="pay-button" loading={busy} disabled={!lines.length && !manuals.length} onPress={pay} />
     </View>
   );
 
@@ -211,6 +229,7 @@ export default function POS() {
         <Btn small variant="ghost" title={`Live Absen · ${live.data?.summary.bertugas ?? 0} bertugas`} icon="pulse-outline" testID="pos-live-button" onPress={() => { live.reload(); setPanel("live"); }} />
         {can("petty_cash") && <Btn small variant="ghost" title="Kas Keluar" icon="cash-outline" testID="pos-petty-button" onPress={() => setExtra("petty")} />}
         {can("external_sales") && <Btn small variant="ghost" title="Pesanan App" icon="bicycle-outline" testID="pos-external-button" onPress={() => setExtra("external")} />}
+        {can("pos") && <Btn small variant="ghost" title="Item Manual" icon="create-outline" testID="pos-manual-button" onPress={() => setManualOpen(true)} />}
       </ScrollView>
       {reg.data && !session ? (
         <OpenRegister userName={user?.name ?? ""} onOpened={() => reg.reload()} />
@@ -292,6 +311,19 @@ export default function POS() {
       </Sheet>
       <PettyCashSheet visible={extra === "petty"} onClose={() => setExtra(null)} onDone={() => reg.reload()} />
       <ExternalOrderSheet visible={extra === "external"} onClose={() => setExtra(null)} menus={menus || []} onDone={(sale) => { setReceipt(sale); reg.reload(); }} />
+      <Sheet visible={manualOpen} onClose={() => { setManualOpen(false); if (manuals.length && !wide) setCartOpen(true); }} title="Input Item Manual" testID="manual-item-sheet">
+        <Text style={[s.sub, { marginBottom: sp.md }]}>Item bebas yang tidak ada di katalog (jasa, request khusus, dll). Tidak memotong stok.</Text>
+        <Field label="Nama item" testID="manual-name-input" value={mName} onChangeText={setMName} />
+        <View style={s.row}>
+          <View style={{ flex: 1 }}><Field label="Qty" testID="manual-qty-input" keyboardType="numeric" value={mQty} onChangeText={setMQty} /></View>
+          <View style={{ flex: 2 }}><Field label="Harga satuan (Rp)" testID="manual-price-input" keyboardType="numeric" value={mPrice} onChangeText={setMPrice} /></View>
+        </View>
+        <Btn title="Tambah ke Keranjang" icon="add" testID="manual-add-button" disabled={!mName.trim() || !num(mPrice)}
+          onPress={() => { setManuals((ms) => [...ms, { name: mName.trim(), qty: Math.max(1, parseInt(mQty || "1") || 1), price: num(mPrice) }]); setMName(""); setMQty("1"); setMPrice(""); }} />
+        {!!manuals.length && <Text style={[s.sub, { marginTop: sp.sm }]}>{manuals.length} item manual di keranjang · {rp(manualSubtotal)}</Text>}
+        <Btn title="Selesai & Bayar" variant="secondary" icon="cart-outline" style={{ marginTop: sp.md }} testID="manual-done-button" disabled={!manuals.length}
+          onPress={() => { setManualOpen(false); if (!wide) setCartOpen(true); }} />
+      </Sheet>
       <Sheet visible={closeOpen} onClose={() => setCloseOpen(false)} title="Tutup Kasir" testID="close-register-sheet">
         {!summary ? <StateView loading /> : (
           <View style={{ gap: sp.md }}>

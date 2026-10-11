@@ -241,7 +241,9 @@ class MenuIn(BaseModel):
 
 
 class SaleItem(BaseModel):
-    menu_id: str
+    menu_id: Optional[str] = None  # None = item manual (bukan dari katalog)
+    name: str = ""
+    price: Optional[float] = None
     qty: int
     note: str = ""
 
@@ -767,18 +769,27 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
     lines, subtotal, hpp_total = [], 0.0, 0.0
     usage = {}
     for it in data.items:
-        m = await db.menus.find_one({"id": it.menu_id}, {"_id": 0})
-        if not m:
-            raise HTTPException(404, "Menu tidak ditemukan")
-        hpp = await menu_hpp(m, imap)
-        lines.append({"menu_id": m["id"], "name": m["name"], "qty": it.qty, "price": m["price"], "note": it.note,
-                      "station": m.get("station") or m.get("location", "bar"),
-                      "hpp": hpp, "subtotal": m["price"] * it.qty})
-        subtotal += m["price"] * it.qty
-        hpp_total += hpp * it.qty
-        for r in m.get("recipe", []):
-            key = (r["ingredient_id"], stock_location(m.get("location", "bar"), st))
-            usage[key] = usage.get(key, 0) + r["qty"] * it.qty
+        if it.menu_id:
+            m = await db.menus.find_one({"id": it.menu_id}, {"_id": 0})
+            if not m:
+                raise HTTPException(404, "Menu tidak ditemukan")
+            hpp = await menu_hpp(m, imap)
+            lines.append({"menu_id": m["id"], "name": m["name"], "qty": it.qty, "price": m["price"], "note": it.note,
+                          "station": m.get("station") or m.get("location", "bar"),
+                          "hpp": hpp, "subtotal": m["price"] * it.qty, "manual": False})
+            subtotal += m["price"] * it.qty
+            hpp_total += hpp * it.qty
+            for r in m.get("recipe", []):
+                key = (r["ingredient_id"], stock_location(m.get("location", "bar"), st))
+                usage[key] = usage.get(key, 0) + r["qty"] * it.qty
+        else:
+            # item manual (bukan dari katalog): tidak memotong stok & tanpa HPP
+            if not str(it.name).strip() or it.price is None or it.price < 0:
+                raise HTTPException(400, "Item manual butuh nama & harga")
+            price = float(it.price)
+            lines.append({"menu_id": None, "name": it.name.strip(), "qty": it.qty, "price": price, "note": it.note,
+                          "station": "bar", "hpp": 0, "subtotal": price * it.qty, "manual": True})
+            subtotal += price * it.qty
     discount, promo_name = 0.0, None
     if data.promo_id:
         p = await db.promos.find_one({"id": data.promo_id}, {"_id": 0})
