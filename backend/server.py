@@ -138,9 +138,39 @@ async def menu_hpp(menu, imap):
     return round(sum(r["qty"] * imap.get(r["ingredient_id"], {}).get("cost_per_unit", 0) for r in menu.get("recipe", [])), 2)
 
 
-async def add_finance(ftype, category, amount, note, ref, user):
-    return await insert("finance", {"type": ftype, "category": category, "amount": round(amount, 2),
-                                    "note": note, "ref": ref, "user_name": user.get("name", "")})
+async def resolve_pocket(category):
+    c = await db.expense_categories.find_one({"name": category, "outlet_id": OUTLET}, {"_id": 0})
+    if c and c.get("pocket_id"):
+        return c["pocket_id"]
+    p = await db.fund_pockets.find_one({"name": category, "outlet_id": OUTLET}, {"_id": 0})
+    return p["id"] if p else None
+
+
+async def add_finance(ftype, category, amount, note, ref, user, **extra):
+    """Single cash/finance ledger. Income/expense lines; negative amounts = reversals (never delete)."""
+    doc = {"type": ftype, "category": category, "amount": round(amount, 2), "note": note, "ref": ref,
+           "user_name": user.get("name", ""), "user_id": user.get("id"), "source": "sistem", "status": "approved",
+           "method": None, "pocket_id": None, "session_id": None, **extra}
+    if ftype == "expense" and not doc["pocket_id"]:
+        doc["pocket_id"] = await resolve_pocket(category)
+    return await insert("finance", doc)
+
+
+async def audit(entity, entity_id, action, user, before=None, after=None, reason=""):
+    """Append-only audit trail (no delete endpoint exists)."""
+    await insert("audit_logs", {"entity": entity, "entity_id": entity_id, "action": action, "before": before,
+                                "after": after, "reason": reason, "user_name": user.get("name", ""),
+                                "user_id": user.get("id"), "role": user.get("role")})
+
+
+async def payment_fee(method, amount):
+    pm = await db.payment_methods.find_one({"name": method, "outlet_id": OUTLET}, {"_id": 0})
+    if not pm:
+        return 0.0
+    if pm.get("kind") == "qris":
+        q = (await get_settings()).get("qris", {})
+        return round(amount * float(q.get("mdr_percent") or 0) / 100 + float(q.get("fixed_fee") or 0), 2)
+    return round(amount * float(pm.get("fee_percent") or 0) / 100 + float(pm.get("fee_fixed") or 0), 2)
 
 
 # ---------------- Models ----------------
@@ -273,12 +303,17 @@ class AttendanceIn(BaseModel):
     hours: float = 0
 
 
+class SlipComponent(BaseModel):
+    component_id: str
+    qty: float = 1
+    amount: Optional[float] = None  # only for method "manual"
+    note: str = ""
+
+
 class PayrollIn(BaseModel):
     user_id: str
     month: str  # YYYY-MM
-    bonus: float = 0
-    deduction: float = 0
-    overtime_rate: float = 25000
+    components: List[SlipComponent] = []
 
 
 class PromoIn(BaseModel):
@@ -506,6 +541,10 @@ DEFAULT_SETTINGS = {
     "service_percent": 0.0,
     "late_tolerance_min": 10, "late_penalty_fixed": 0.0, "late_penalty_per_minute": 0.0,
     "loyalty_enabled": True, "points_per_nota": 1, "points_min_purchase": 0, "points_per_amount": 0,
+    "petty_cash_limit": 50000.0,
+    "printer": {"paper_width": 58},
+    "qris": {"provider": "", "merchant_name": "", "merchant_id": "", "bank_name": "", "account_no": "", "account_name": "",
+             "settlement_info": "", "mdr_percent": 0.7, "fixed_fee": 0, "effective_date": ""},
     "receipt": {"cafe_name": "ROLLOW", "address": "", "phone": "", "header_note": "",
                 "footer_note": "Terima kasih atas kunjungan Anda!", "wifi": "",
                 "show_cashier": True, "show_customer": True, "show_points": True},
@@ -525,23 +564,31 @@ class SettingsIn(BaseModel):
     late_tolerance_min: int = 10
     late_penalty_fixed: float = 0
     late_penalty_per_minute: float = 0
+    petty_cash_limit: float = 50000
+    printer: dict = {}
+    qris: dict = {}
     receipt: dict
 
 
 async def get_settings():
     d = await db.settings.find_one({"outlet_id": OUTLET}, {"_id": 0})
     out = {**DEFAULT_SETTINGS, **(d or {})}
-    out["receipt"] = {**DEFAULT_SETTINGS["receipt"], **((d or {}).get("receipt") or {})}
+    for k in ["receipt", "printer", "qris"]:
+        out[k] = {**DEFAULT_SETTINGS[k], **((d or {}).get(k) or {})}
     return out
 
 
 @api.get("/settings")
 async def read_settings(u=Depends(current_user)):
-    return await get_settings()
+    st = await get_settings()
+    if u["role"] not in PERM["settings"]:  # hide sensitive bank / merchant data
+        st["qris"] = {k: st["qris"].get(k) for k in ["provider", "merchant_name", "mdr_percent", "fixed_fee"]}
+    return st
 
 
 @api.put("/settings")
 async def write_settings(data: SettingsIn, u=Depends(need("settings"))):
+    await audit("settings", OUTLET, "update", u, before=await get_settings(), after=data.model_dump())
     await db.settings.update_one({"outlet_id": OUTLET}, {"$set": {**data.model_dump(), "outlet_id": OUTLET,
                                  "updated_by": u["name"], "updated_at": now().isoformat()}}, upsert=True)
     return await get_settings()
@@ -698,9 +745,16 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
     for (iid, loc), q in usage.items():
         await move_stock(iid, loc, -q, "penjualan", sale["number"], u)
     # sale -> finance income (tax collected recorded separately as liability-like income line)
-    await add_finance("income", "Penjualan", round(base + service, 2), f"Penjualan {sale['number']} ({data.payment_method})", sale["id"], u)
+    tag = {"method": data.payment_method, "session_id": sess["id"], "source": "kasir"}
+    await add_finance("income", "Penjualan", round(base + service, 2), f"Penjualan {sale['number']} ({data.payment_method})", sale["id"], u, **tag)
     if tax:
-        await add_finance("income", f"Pajak {st['tax_name']}", tax, f"Pajak {sale['number']}", sale["id"], u)
+        await add_finance("income", f"Pajak {st['tax_name']}", tax, f"Pajak {sale['number']}", sale["id"], u, **tag)
+    fee = await payment_fee(data.payment_method, total)
+    await db.sales.update_one({"id": sale["id"]}, {"$set": {"payment_fee": fee, "expected_net": round(total - fee, 2)}})
+    sale.update({"payment_fee": fee, "expected_net": round(total - fee, 2)})
+    if fee:
+        await add_finance("expense", "Biaya Pembayaran", fee, f"MDR/biaya {data.payment_method} {sale['number']}", sale["id"], u,
+                          method=data.payment_method, source="sistem")
     if cust:
         await db.customers.update_one({"id": cust["id"]}, {"$inc": {"points": points, "visits": 1, "total_spent": total}})
     return sale
@@ -709,6 +763,7 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
 class VoidIn(BaseModel):
     kind: str  # void | cancelled
     reason: str
+    refund_now: bool = True
 
 
 @api.post("/sales/{sid}/void")
@@ -722,16 +777,30 @@ async def void_sale(sid: str, data: VoidIn, u=Depends(need("sales_void"))):
     movs = await db.stock_movements.find({"ref": s["number"], "type": "penjualan", "outlet_id": OUTLET}, {"_id": 0}).to_list(500)
     for mv in movs:
         await move_stock(mv["ingredient_id"], mv["location"], -mv["qty"], f"{data.kind}_penjualan", s["number"], u)
-    # reverse finance
-    fins = await db.finance.find({"ref": sid, "type": "income", "outlet_id": OUTLET}, {"_id": 0}).to_list(10)
-    for f in fins:
-        await add_finance("income", f["category"], -f["amount"], f"{data.kind.upper()} {s['number']}: {data.reason}", sid, u)
+    # original payment lines stay; payment fee is reversed; money back is a separate refund record
+    sess = await open_session()
+    fees = await db.finance.find({"ref": sid, "type": "expense", "category": "Biaya Pembayaran", "outlet_id": OUTLET}, {"_id": 0}).to_list(5)
+    for f in fees:
+        await add_finance("expense", f["category"], -f["amount"], f"Batal biaya {s['number']}", sid, u, method=f.get("method"))
+    refund = await insert("refunds", {"sale_id": sid, "number": s["number"], "amount": s["total"], "method": s["payment_method"],
+                                      "reason": data.reason, "status": "pending", "created_by": u["name"]})
+    if data.refund_now:
+        await pay_refund_doc(refund, u, sess)
     # reverse loyalty
     if s.get("customer_id"):
         await db.customers.update_one({"id": s["customer_id"]}, {"$inc": {"points": -s.get("points_earned", 0), "visits": -1, "total_spent": -s["total"]}})
     await db.sales.update_one({"id": sid}, {"$set": {"status": data.kind, "void_reason": data.reason,
                                                     "void_by": u["name"], "void_at": now().isoformat()}})
-    return {"ok": True, "status": data.kind}
+    await audit("sale", sid, data.kind, u, before={"status": s.get("status", "paid"), "total": s["total"]},
+                after={"status": data.kind, "refund_id": refund["id"], "refund_now": data.refund_now}, reason=data.reason)
+    return {"ok": True, "status": data.kind, "refund": refund}
+
+
+async def pay_refund_doc(refund, u, sess=None):
+    sess = sess or await open_session()
+    await add_finance("income", "Refund Penjualan", -refund["amount"], f"Refund {refund['number']}: {refund['reason']}", refund["sale_id"], u,
+                      method=refund["method"], session_id=sess["id"] if sess else None, source="kasir")
+    await db.refunds.update_one({"id": refund["id"]}, {"$set": {"status": "paid", "paid_by": u["name"], "paid_at": now().isoformat()}})
 
 
 @api.get("/sales")
@@ -764,7 +833,17 @@ async def pos_summary(u=Depends(need("pos"))):
     return {"count": len(sales), "total": round(sum(x["total"] for x in sales), 2),
             "discount": round(sum(x["discount"] for x in sales), 2), "by_method": by,
             "opening_cash": sess["opening_cash"] if sess else 0, "shifts": sess["shifts"] if sess else [],
+            "cash_ledger": await cash_ledger(sess),
             "closings": await find("register_closes", {"date": today()})}
+
+
+async def cash_ledger(sess):
+    if not sess:
+        return {"cash_in": 0, "cash_out": 0, "expected_cash": 0}
+    rows = await db.finance.find({"session_id": sess["id"], "method": "Cash", "outlet_id": OUTLET}, {"_id": 0}).to_list(5000)
+    cin = sum(r["amount"] for r in rows if r["type"] == "income")
+    cout = sum(r["amount"] for r in rows if r["type"] == "expense")
+    return {"cash_in": round(cin, 2), "cash_out": round(cout, 2), "expected_cash": round(sess["opening_cash"] + cin - cout, 2)}
 
 
 @api.post("/pos/close")
@@ -778,7 +857,7 @@ async def pos_close(u=Depends(need("pos"))):
     shifts = summ["shifts"]
     shifts[-1].update({"end": t.strftime("%H:%M"), "end_ts": t.isoformat()})
     rec = await insert("register_closes", {**summ, "session_id": sess["id"], "user_name": u["name"],
-                                           "expected_cash": summ["opening_cash"] + summ["by_method"].get("Cash", 0)})
+                                           "expected_cash": summ["cash_ledger"]["expected_cash"]})
     await db.register_sessions.update_one({"id": sess["id"]}, {"$set": {"status": "closed", "shifts": shifts, "closed_by": u["name"], "closed_at": t.isoformat()}})
     await db.sales.update_many({"session_id": sess["id"]}, {"$set": {"closed": True}})
     return rec
@@ -1066,9 +1145,26 @@ async def create_payroll(data: PayrollIn, u=Depends(need("payroll"))):
     if await db.payrolls.find_one({"user_id": data.user_id, "month": data.month, "outlet_id": OUTLET}):
         raise HTTPException(409, "Payroll bulan ini sudah dibuat")
     c = await compute_pay(emp, data.month, await get_settings())
-    total = c["estimate"] + data.bonus - data.deduction
     c.pop("estimate")
-    return await insert("payrolls", {**c, "bonus": data.bonus, "deduction": data.deduction, "total": round(total, 2), "status": "draft"})
+    bonuses, deductions = [], []
+    for sc in data.components:
+        comp = await db.payroll_components.find_one({"id": sc.component_id, "outlet_id": OUTLET}, {"_id": 0})
+        if not comp or not comp.get("is_active", True):
+            raise HTTPException(400, "Komponen gaji tidak valid / nonaktif")
+        m, a = comp["method"], float(comp.get("amount") or 0)
+        val = {"fixed": a * sc.qty, "percent_base": c["base_salary"] * a / 100, "per_late": c["late_count"] * a,
+               "per_late_minute": c["late_minutes"] * a, "per_day_present": c["attendance"]["clock_in"] * a,
+               "per_hour_worked": c["hours"] * a, "manual": sc.amount or 0}.get(m, 0)
+        line = {"component_id": comp["id"], "name": comp["name"], "description": comp.get("description", ""), "method": m,
+                "rate": a, "qty": sc.qty, "amount": round(val, 2), "note": sc.note}
+        (bonuses if comp["type"] == "bonus" else deductions).append(line)
+    tb = round(sum(x["amount"] for x in bonuses), 2)
+    td = round(sum(x["amount"] for x in deductions), 2)
+    gross = c["base_salary"] + c["allowance"] + c["hourly_pay"] + c["overtime"]
+    # snapshot: later component changes never alter a saved slip
+    return await insert("payrolls", {**c, "bonuses": bonuses, "deductions": deductions, "total_bonus": tb, "total_deduction": td,
+                                     "bonus": tb, "deduction": td, "late_penalty": 0, "gross": round(gross, 2),
+                                     "total": round(gross + tb - td, 2), "status": "draft", "created_by": u["name"]})
 
 
 @api.get("/payroll")
@@ -1081,7 +1177,8 @@ async def pay_payroll(pid: str, u=Depends(need("payroll"))):
     p = await db.payrolls.find_one({"id": pid}, {"_id": 0})
     if not p or p["status"] == "paid":
         raise HTTPException(400, "Payroll tidak valid / sudah dibayar")
-    await add_finance("expense", "Gaji", p["total"], f"Gaji {p['name']} {p['month']}", pid, u)
+    await add_finance("expense", "Gaji", p["total"], f"Gaji {p['name']} {p['month']}", pid, u, source="payroll", method="Transfer")
+    await audit("payroll", pid, "pay", u, before={"status": p["status"]}, after={"status": "paid", "total": p["total"]})
     await db.payrolls.update_one({"id": pid}, {"$set": {"status": "paid", "paid_at": now().isoformat()}})
     return {"ok": True}
 
@@ -1262,6 +1359,10 @@ async def seed():
                                 "description": "Diskon 10% semua menu", "budget": 0, "is_active": True})
 
 
+from ext_routes import router as ext_router, seed_ext  # noqa: E402
+
+api.include_router(ext_router)
+app.add_event_handler("startup", seed_ext)
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 logging.basicConfig(level=logging.INFO)
