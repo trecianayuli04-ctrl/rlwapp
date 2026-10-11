@@ -41,6 +41,11 @@ PERM = {
     "customers": ["owner", "manager", "supervisor", "marketing", "crew"],
     "attendance_live": ["owner", "manager", "supervisor", "finance", "crew"],
     "overtime_approve": ["owner", "manager", "supervisor"],
+    "audit": ["owner", "finance"],
+    "petty_cash": OPS,
+    "petty_cash_approve": MGMT + ["finance"],
+    "adjust": ["owner", "manager", "supervisor", "finance"],
+    "external_sales": OPS + ["finance"],
 }
 REPORTS = {
     "sales": ["owner", "manager", "supervisor", "finance", "marketing"],
@@ -136,6 +141,16 @@ async def ingredient_map():
 
 async def menu_hpp(menu, imap):
     return round(sum(r["qty"] * imap.get(r["ingredient_id"], {}).get("cost_per_unit", 0) for r in menu.get("recipe", [])), 2)
+
+
+def stock_location(menu_loc, st):
+    """Simple mode -> semua stok di satu pool (gudang). Detailed -> per lokasi menu."""
+    return "gudang" if (st or {}).get("stock_mode") == "simple" else (menu_loc or "bar")
+
+
+def sale_total(x):
+    """Nilai akhir nota (pakai final_total jika ada penyesuaian pembayaran)."""
+    return x.get("final_total", x.get("total", 0))
 
 
 async def resolve_pocket(category):
@@ -326,6 +341,53 @@ class PromoIn(BaseModel):
     description: str = ""
     budget: float = 0
     is_active: bool = True
+
+
+class ExpenseIn(BaseModel):
+    category: str
+    amount: float
+    note: str = ""
+    method: str = "Cash"
+    pocket_id: Optional[str] = None
+    receiver: str = ""
+    ref: str = ""
+    photo: str = ""  # base64 bukti
+    source: Optional[str] = None
+
+
+class AdjustIn(BaseModel):
+    type: str  # refund | additional
+    amount: float
+    method: Optional[str] = None
+    note: str = ""
+
+
+class PrintLogIn(BaseModel):
+    station: str = "customer"
+    status: str = "success"  # success | failed
+    note: str = ""
+
+
+class ExtItem(BaseModel):
+    menu_id: Optional[str] = None
+    name: str = ""
+    qty: int = 1
+    price: float = 0
+    note: str = ""
+
+
+class ExtSaleIn(BaseModel):
+    platform: str
+    order_no: str = ""
+    items: List[ExtItem]
+    discount: float = 0
+    discount_borne_by: Optional[str] = None  # outlet | platform
+    commission_percent: Optional[float] = None
+    other_fee_percent: Optional[float] = None
+    fee_fixed: Optional[float] = None
+    payment_status: str = "pending"  # pending | settled
+    customer: str = ""
+    note: str = ""
 
 
 # ---------------- Auth & users ----------------
@@ -542,6 +604,8 @@ DEFAULT_SETTINGS = {
     "late_tolerance_min": 10, "late_penalty_fixed": 0.0, "late_penalty_per_minute": 0.0,
     "loyalty_enabled": True, "points_per_nota": 1, "points_min_purchase": 0, "points_per_amount": 0,
     "petty_cash_limit": 50000.0,
+    "stock_mode": "detailed",  # detailed = gudang/bar/kitchen terpisah | simple = satu stok total
+    "petty_cash_needs_approval": False,
     "printer": {"paper_width": 58},
     "qris": {"provider": "", "merchant_name": "", "merchant_id": "", "bank_name": "", "account_no": "", "account_name": "",
              "settlement_info": "", "mdr_percent": 0.7, "fixed_fee": 0, "effective_date": ""},
@@ -565,6 +629,8 @@ class SettingsIn(BaseModel):
     late_penalty_fixed: float = 0
     late_penalty_per_minute: float = 0
     petty_cash_limit: float = 50000
+    stock_mode: str = "detailed"
+    petty_cash_needs_approval: bool = False
     printer: dict = {}
     qris: dict = {}
     receipt: dict
@@ -711,7 +777,7 @@ async def create_sale(data: SaleIn, u=Depends(need("pos"))):
         subtotal += m["price"] * it.qty
         hpp_total += hpp * it.qty
         for r in m.get("recipe", []):
-            key = (r["ingredient_id"], m.get("location", "bar"))
+            key = (r["ingredient_id"], stock_location(m.get("location", "bar"), st))
             usage[key] = usage.get(key, 0) + r["qty"] * it.qty
     discount, promo_name = 0.0, None
     if data.promo_id:
@@ -811,15 +877,17 @@ async def list_sales(date: Optional[str] = None, period: str = "day", status: st
         q["status"] = status if status != "paid" else {"$nin": ["void", "cancelled"]}
     sales = await find("sales", q, limit=2000)
     valid = [x for x in sales if x.get("status", "paid") not in ["void", "cancelled"]]
-    by = {}
+    by, by_channel = {}, {}
     for x in valid:
-        by[x["payment_method"]] = by.get(x["payment_method"], 0) + x["total"]
+        by[x["payment_method"]] = by.get(x["payment_method"], 0) + sale_total(x)
+        ch = x.get("channel", "kasir")
+        by_channel[ch] = by_channel.get(ch, 0) + sale_total(x)
     recap = {"nota": len(valid), "void": len([x for x in sales if x.get("status") == "void"]),
              "cancelled": len([x for x in sales if x.get("status") == "cancelled"]),
              "subtotal": sum(x["subtotal"] for x in valid), "discount": sum(x["discount"] for x in valid),
              "tax": sum(x.get("tax", 0) for x in valid), "service": sum(x.get("service", 0) for x in valid),
-             "total": sum(x["total"] for x in valid), "hpp": sum(x["hpp"] for x in valid),
-             "profit": sum(x["profit"] for x in valid), "by_method": by}
+             "total": sum(sale_total(x) for x in valid), "hpp": sum(x["hpp"] for x in valid),
+             "profit": sum(x["profit"] for x in valid), "by_method": by, "by_channel": by_channel}
     return {"recap": recap, "sales": sales}
 
 
@@ -1310,6 +1378,327 @@ async def report(rtype: str, period: str = "day", date: Optional[str] = None, u=
     return {"type": rtype, "period": period, "range": p, "summary": S, "rows": rows}
 
 
+# ---------------- Pengeluaran (petty cash kasir + finance) ----------------
+@api.post("/expenses")
+async def create_expense(data: ExpenseIn, u=Depends(need("petty_cash"))):
+    if data.amount <= 0:
+        raise HTTPException(400, "Nominal tidak valid")
+    st = await get_settings()
+    needs = bool(st.get("petty_cash_needs_approval")) and u["role"] not in PERM["petty_cash_approve"]
+    sess = await open_session()
+    source = data.source or ("kasir" if u["role"] in OPS else "finance")
+    if needs:
+        doc = await insert("expenses_pending", {"category": data.category, "amount": round(data.amount, 2), "note": data.note,
+                                                "method": data.method, "pocket_id": data.pocket_id, "receiver": data.receiver,
+                                                "ref": data.ref, "photo": data.photo, "source": source, "status": "pending",
+                                                "user_name": u["name"], "user_id": u["id"],
+                                                "session_id": sess["id"] if sess else None})
+        await audit("expense", doc["id"], "request", u, after={"category": data.category, "amount": doc["amount"]}, reason=data.note)
+        return {"pending": True, **doc}
+    fin = await add_finance("expense", data.category, round(data.amount, 2), data.note, data.ref, u, method=data.method,
+                            source=source, pocket_id=data.pocket_id, receiver=data.receiver, photo=data.photo,
+                            session_id=sess["id"] if (sess and data.method == "Cash") else None)
+    await audit("expense", fin["id"], "create", u, after={"category": data.category, "amount": fin["amount"], "method": data.method}, reason=data.note)
+    return {"pending": False, **fin}
+
+
+@api.get("/expenses")
+async def list_expenses(month: Optional[str] = None, date: Optional[str] = None, pending: bool = False, u=Depends(need("petty_cash"))):
+    if pending:
+        return await find("expenses_pending", {"status": "pending"}, limit=500)
+    rows = await db.finance.find({"type": "expense", "outlet_id": OUTLET, "date": {"$regex": f"^{date or month or today()[:7]}"}},
+                                 {"_id": 0}).sort("created_at", -1).to_list(3000)
+    if u["role"] not in PERM["finance"]:  # kasir/crew hanya lihat pengeluaran kasir
+        rows = [r for r in rows if r.get("source") == "kasir"]
+    return rows
+
+
+@api.post("/expenses/{eid}/decide")
+async def decide_expense(eid: str, data: DecisionIn, u=Depends(need("petty_cash_approve"))):
+    p = await db.expenses_pending.find_one({"id": eid, "outlet_id": OUTLET}, {"_id": 0})
+    if not p or p["status"] != "pending":
+        raise HTTPException(400, "Pengeluaran tidak ditemukan / sudah diproses")
+    status = "approved" if data.approve else "rejected"
+    upd = {"status": status, "approved_by": u["name"], "approved_at": now().isoformat(), "decide_note": data.note}
+    if data.approve:
+        sess = await open_session()
+        fin = await add_finance("expense", p["category"], p["amount"], p["note"], p.get("ref", ""), u, method=p.get("method"),
+                                source=p.get("source", "kasir"), pocket_id=p.get("pocket_id"), receiver=p.get("receiver", ""),
+                                photo=p.get("photo", ""), requested_by=p.get("user_name"),
+                                session_id=sess["id"] if (sess and p.get("method") == "Cash") else None)
+        upd["finance_id"] = fin["id"]
+    await db.expenses_pending.update_one({"id": eid}, {"$set": upd})
+    await audit("expense", eid, "decide", u, before={"status": "pending"}, after={"status": status}, reason=data.note)
+    return {"ok": True, "status": status}
+
+
+# ---------------- Penyesuaian pembayaran nota ----------------
+@api.post("/sales/{sid}/adjust")
+async def adjust_sale(sid: str, data: AdjustIn, u=Depends(need("adjust"))):
+    s = await db.sales.find_one({"id": sid, "outlet_id": OUTLET}, {"_id": 0})
+    if not s or s.get("status") in ["void", "cancelled"]:
+        raise HTTPException(400, "Nota tidak ditemukan / sudah dibatalkan")
+    if data.type not in ["refund", "additional"] or data.amount <= 0:
+        raise HTTPException(400, "Data penyesuaian tidak valid")
+    sess = await open_session()
+    before = sale_total(s)
+    method = data.method or s["payment_method"]
+    if data.type == "refund":
+        after = round(before - data.amount, 2)
+        await add_finance("income", "Refund Penyesuaian", -round(data.amount, 2), f"Refund penyesuaian {s['number']}: {data.note}",
+                          sid, u, method=method, source="kasir", session_id=sess["id"] if sess else None)
+    else:
+        after = round(before + data.amount, 2)
+        await add_finance("income", "Penjualan", round(data.amount, 2), f"Tambahan bayar {s['number']}: {data.note}",
+                          sid, u, method=method, source="kasir", session_id=sess["id"] if sess else None)
+    adj = {"type": data.type, "amount": round(data.amount, 2), "method": method, "note": data.note,
+           "by": u["name"], "at": now().isoformat(), "before_total": before, "after_total": after}
+    await db.sales.update_one({"id": sid}, {"$push": {"adjustments": adj}, "$set": {"final_total": after}})
+    await audit("sale", sid, "adjust", u, before={"total": before}, after={"total": after, "type": data.type, "amount": data.amount}, reason=data.note)
+    return {"ok": True, "adjustment": adj, "final_total": after}
+
+
+# ---------------- Log cetak / cetak ulang nota (tidak mengubah transaksi) ----------------
+@api.post("/sales/{sid}/print-log")
+async def print_log(sid: str, data: PrintLogIn, u=Depends(need("sales_view"))):
+    s = await db.sales.find_one({"id": sid, "outlet_id": OUTLET}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Nota tidak ditemukan")
+    log = {"station": data.station, "status": data.status, "note": data.note, "by": u["name"], "at": now().isoformat()}
+    await db.sales.update_one({"id": sid}, {"$push": {"print_logs": log}, "$inc": {"print_count": 1}})
+    return {"ok": True, "log": log}
+
+
+# ---------------- Penjualan platform eksternal (ShopeeFood/GoFood/GrabFood) ----------------
+@api.post("/external-sales")
+async def create_external_sale(data: ExtSaleIn, u=Depends(need("external_sales"))):
+    if not data.items:
+        raise HTTPException(400, "Minimal 1 item")
+    plat = await db.platforms.find_one({"name": data.platform, "outlet_id": OUTLET}, {"_id": 0})
+    if not plat:
+        raise HTTPException(400, "Platform tidak dikenal")
+    if data.order_no and await db.sales.find_one({"channel": "platform", "platform": data.platform, "order_no": data.order_no, "outlet_id": OUTLET}):
+        raise HTTPException(409, "Nomor pesanan sudah pernah dicatat")
+    st = await get_settings()
+    imap = await ingredient_map()
+    lines, subtotal, hpp_total, usage = [], 0.0, 0.0, {}
+    for it in data.items:
+        price, qty, name, hpp, station = float(it.price), int(it.qty), it.name, 0.0, "bar"
+        if it.menu_id:
+            m = await db.menus.find_one({"id": it.menu_id}, {"_id": 0})
+            if m:
+                name = name or m["name"]
+                station = m.get("station") or m.get("location", "bar")
+                hpp = await menu_hpp(m, imap)
+                for r in m.get("recipe", []):
+                    key = (r["ingredient_id"], stock_location(m.get("location", "bar"), st))
+                    usage[key] = usage.get(key, 0) + r["qty"] * qty
+        if not name:
+            raise HTTPException(400, "Nama item wajib diisi")
+        lines.append({"menu_id": it.menu_id, "name": name, "qty": qty, "price": price, "note": it.note,
+                      "station": station, "hpp": hpp, "subtotal": price * qty})
+        subtotal += price * qty
+        hpp_total += hpp * qty
+    gross = round(subtotal, 2)
+    discount = round(float(data.discount or 0), 2)
+    borne = data.discount_borne_by or plat.get("discount_borne_by", "outlet")
+    comm_pct = data.commission_percent if data.commission_percent is not None else plat.get("commission_percent", 0)
+    other_pct = data.other_fee_percent if data.other_fee_percent is not None else plat.get("other_fee_percent", 0)
+    fee_fixed = data.fee_fixed if data.fee_fixed is not None else plat.get("fee_fixed", 0)
+    commission = round(gross * float(comm_pct or 0) / 100, 2)
+    other_fee = round(gross * float(other_pct or 0) / 100 + float(fee_fixed or 0), 2)
+    outlet_disc = discount if borne == "outlet" else 0.0
+    net = round(gross - commission - other_fee - outlet_disc, 2)
+    count = await db.sales.count_documents({"date": today(), "outlet_id": OUTLET})
+    sale = await insert("sales", {
+        "number": f"EXT-{now().strftime('%y%m%d')}-{count + 1:04d}", "items": lines, "subtotal": gross,
+        "discount": discount, "discount_borne_by": borne, "promo_id": None, "promo_name": None,
+        "service": 0, "tax": 0, "tax_name": None, "tax_percent": 0, "total": gross, "final_total": gross,
+        "hpp": round(hpp_total, 2), "profit": round(gross - hpp_total - commission - other_fee - outlet_disc, 2),
+        "payment_method": data.platform, "channel": "platform", "platform": data.platform, "order_no": data.order_no,
+        "commission": commission, "other_fee": other_fee, "platform_fee": round(commission + other_fee, 2), "expected_net": net,
+        "cash_received": 0, "customer": data.customer, "customer_id": None, "customer_phone": "", "points_earned": 0,
+        "order_note": data.note, "time": now().strftime("%H:%M"), "status": "paid", "payment_status": data.payment_status,
+        "session_id": None, "shift_no": None, "input_by": u["name"], "cashier_id": u["id"], "cashier_name": u["name"], "closed": False})
+    for (iid, loc), q in usage.items():
+        await move_stock(iid, loc, -q, "penjualan_platform", sale["number"], u)
+    tag = {"method": data.platform, "source": "platform", "channel": "platform"}
+    await add_finance("income", "Penjualan", gross, f"Penjualan {data.platform} {sale['number']}", sale["id"], u, **tag)
+    if commission:
+        await add_finance("expense", "Komisi Platform", commission, f"Komisi {data.platform} {sale['number']}", sale["id"], u, method=data.platform, source="platform")
+    if other_fee:
+        await add_finance("expense", "Biaya Platform", other_fee, f"Biaya {data.platform} {sale['number']}", sale["id"], u, method=data.platform, source="platform")
+    if outlet_disc:
+        await add_finance("expense", "Diskon Ditanggung Outlet", outlet_disc, f"Diskon {data.platform} {sale['number']}", sale["id"], u, method=data.platform, source="platform")
+    await audit("external_sale", sale["id"], "create", u, after={"platform": data.platform, "gross": gross, "net": net, "order_no": data.order_no})
+    return sale
+
+
+# ---------------- Ringkasan keuangan: omzet, alokasi kantong, breakdown metode/channel ----------------
+@api.get("/finance/summary")
+async def finance_summary(period: str = "month", date: Optional[str] = None, u=Depends(need("finance"))):
+    p = rng(period, date)
+    fin = await find("finance", {"date": {"$regex": f"^{p}"}}, limit=10000)
+    sales = await find("sales", {"date": {"$regex": f"^{p}"}, **VALID_SALE}, limit=10000)
+    gross = sum(sale_total(s) for s in sales)
+    disc = sum(s.get("discount", 0) for s in sales)
+    hpp = sum(s.get("hpp", 0) for s in sales)
+    income = sum(f["amount"] for f in fin if f["type"] == "income")
+    expense = sum(f["amount"] for f in fin if f["type"] == "expense")
+    refund = -sum(f["amount"] for f in fin if f["type"] == "income" and f["amount"] < 0)
+    net_omzet = round(gross - refund, 2)
+    methods = {}
+    for s in sales:
+        d = methods.setdefault(s["payment_method"], {"method": s["payment_method"], "count": 0, "total": 0.0, "fee": 0.0})
+        d["count"] += 1
+        d["total"] += sale_total(s)
+    for f in fin:
+        if f["type"] == "expense" and f.get("category") in ["Biaya Pembayaran", "Komisi Platform", "Biaya Platform"] and f.get("method") in methods:
+            methods[f["method"]]["fee"] += f["amount"]
+    for d in methods.values():
+        d["fee"] = round(d["fee"], 2)
+        d["total"] = round(d["total"], 2)
+        d["net"] = round(d["total"] - d["fee"], 2)
+    channels = {}
+    for s in sales:
+        d = channels.setdefault(s.get("channel", "kasir"), {"channel": s.get("channel", "kasir"), "count": 0, "gross": 0.0, "fee": 0.0, "net": 0.0})
+        d["count"] += 1
+        d["gross"] += sale_total(s)
+        d["fee"] += s.get("platform_fee", 0)
+        d["net"] += s.get("expected_net", sale_total(s))
+    for d in channels.values():
+        for k in ["gross", "fee", "net"]:
+            d[k] = round(d[k], 2)
+    exp_cat = {}
+    for f in fin:
+        if f["type"] == "expense":
+            exp_cat[f["category"]] = round(exp_cat.get(f["category"], 0) + f["amount"], 2)
+    pockets = await find("fund_pockets", limit=100)
+    cat_pocket = {c["name"]: c.get("pocket_id") for c in await find("expense_categories", limit=200)}
+    pocket_actual = {}
+    for f in fin:
+        if f["type"] == "expense":
+            pid = f.get("pocket_id") or cat_pocket.get(f["category"])
+            if pid:
+                pocket_actual[pid] = round(pocket_actual.get(pid, 0) + f["amount"], 2)
+    pocket_rows = []
+    for pk in sorted(pockets, key=lambda x: x.get("sort", 0)):
+        mth, val = pk.get("alloc_method"), pk.get("alloc_value", 0)
+        alloc = round(net_omzet * val / 100, 2) if mth == "percent" else (round(val, 2) if mth == "fixed" else 0.0)
+        actual = pocket_actual.get(pk["id"], 0)
+        pocket_rows.append({"id": pk["id"], "name": pk["name"], "alloc_method": mth, "alloc_value": val,
+                            "allocated": alloc, "actual": round(actual, 2), "diff": round(alloc - actual, 2)})
+    return {"period": period, "range": p,
+            "omzet": {"gross": round(gross, 2), "discount": round(disc, 2), "refund": round(refund, 2),
+                      "net": net_omzet, "hpp": round(hpp, 2), "gross_profit": round(net_omzet - hpp, 2)},
+            "cashflow": {"income": round(income, 2), "expense": round(expense, 2), "net": round(income - expense, 2)},
+            "by_method": sorted(methods.values(), key=lambda x: -x["total"]),
+            "by_channel": sorted(channels.values(), key=lambda x: -x["gross"]),
+            "expenses_by_category": [{"category": k, "amount": v} for k, v in sorted(exp_cat.items(), key=lambda x: -x[1])],
+            "pockets": pocket_rows}
+
+
+# ---------------- Config registries (metode bayar, kategori, kantong dana, komponen payroll, platform) ----------------
+REGISTRY_FIELDS = {
+    "payment_methods": {"name": "", "kind": "other", "fee_percent": 0.0, "fee_fixed": 0.0, "is_active": True, "sort": 0},
+    "expense_categories": {"name": "", "description": "", "pocket_id": None, "is_active": True, "sort": 0},
+    "fund_pockets": {"name": "", "description": "", "alloc_method": "none", "alloc_value": 0.0, "is_active": True, "sort": 0},
+    "payroll_components": {"name": "", "type": "bonus", "description": "", "method": "fixed", "amount": 0.0, "is_active": True, "sort": 0},
+    "platforms": {"name": "", "commission_percent": 0.0, "other_fee_percent": 0.0, "fee_fixed": 0.0,
+                  "discount_borne_by": "outlet", "payout_schedule": "", "settlement_ref": "", "is_active": True, "sort": 0},
+}
+REGISTRY_PERM = {"payment_methods": "settings", "expense_categories": "settings", "fund_pockets": "settings",
+                 "payroll_components": "payroll", "platforms": "settings"}
+
+
+def clean_registry(kind, payload):
+    out = {}
+    for k, dflt in REGISTRY_FIELDS[kind].items():
+        v = payload.get(k, dflt)
+        if v is None and dflt is not None:
+            v = dflt
+        if isinstance(dflt, bool):
+            v = bool(v)
+        elif isinstance(dflt, float):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                v = 0.0
+        elif isinstance(dflt, int):
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                v = 0
+        out[k] = v
+    return out
+
+
+@api.get("/config/{kind}")
+async def config_list(kind: str, active: bool = False, u=Depends(current_user)):
+    if kind not in REGISTRY_FIELDS:
+        raise HTTPException(404, "Konfigurasi tidak ada")
+    items = sorted(await find(kind, limit=500), key=lambda x: (x.get("sort", 0), x.get("name", "")))
+    if active:
+        items = [x for x in items if x.get("is_active", True)]
+    # sembunyikan referensi settlement platform utk non-finance
+    if kind == "platforms" and u["role"] not in PERM["settings"]:
+        for x in items:
+            x.pop("settlement_ref", None)
+    return items
+
+
+@api.post("/config/{kind}")
+async def config_create(kind: str, payload: dict, u=Depends(current_user)):
+    if kind not in REGISTRY_FIELDS:
+        raise HTTPException(404, "Konfigurasi tidak ada")
+    if u["role"] not in PERM[REGISTRY_PERM[kind]]:
+        raise HTTPException(403, "Akses ditolak untuk jabatan Anda")
+    doc = clean_registry(kind, payload)
+    if not str(doc["name"]).strip():
+        raise HTTPException(400, "Nama wajib diisi")
+    created = await insert(kind, doc)
+    await audit(kind, created["id"], "create", u, after=doc)
+    return created
+
+
+@api.put("/config/{kind}/{iid}")
+async def config_update(kind: str, iid: str, payload: dict, u=Depends(current_user)):
+    if kind not in REGISTRY_FIELDS:
+        raise HTTPException(404, "Konfigurasi tidak ada")
+    if u["role"] not in PERM[REGISTRY_PERM[kind]]:
+        raise HTTPException(403, "Akses ditolak untuk jabatan Anda")
+    before = await db[kind].find_one({"id": iid, "outlet_id": OUTLET}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "Data tidak ditemukan")
+    doc = clean_registry(kind, {**before, **payload})
+    await db[kind].update_one({"id": iid, "outlet_id": OUTLET}, {"$set": doc})
+    await audit(kind, iid, "update", u, before={k: before.get(k) for k in doc}, after=doc)
+    return {**before, **doc}
+
+
+# ---------------- Audit trail viewer ----------------
+@api.get("/audit")
+async def list_audit(start: Optional[str] = None, end: Optional[str] = None, entity: str = "all",
+                     action: str = "all", user_id: str = "all", limit: int = 500, u=Depends(need("audit"))):
+    q = {}
+    if entity != "all":
+        q["entity"] = entity
+    if action != "all":
+        q["action"] = action
+    if user_id != "all":
+        q["user_id"] = user_id
+    if start or end:
+        rng = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end + "T23:59:59"
+        q["created_at"] = rng
+    logs = await find("audit_logs", q, limit=min(limit, 2000))
+    entities = await db.audit_logs.distinct("entity", {"outlet_id": OUTLET})
+    return {"logs": logs, "entities": sorted(entities)}
+
+
 # ---------------- Seed ----------------
 @app.on_event("startup")
 async def seed():
@@ -1331,6 +1720,39 @@ async def seed():
     await db.users.update_many({"email": "crew@rollow.id", "hourly_rate": {"$exists": False}},
                                {"$set": {"hourly_rate": 15000, "overtime_rate": 20000, "shift_start": "08:00", "base_salary": 0}})
     await db.users.update_many({"shift_start": {"$exists": False}}, {"$set": {"shift_start": "08:00", "hourly_rate": 0, "overtime_rate": 0}})
+    # --- config registries (metode bayar, kantong, kategori, komponen gaji, platform) ---
+    if await db.payment_methods.count_documents({"outlet_id": OUTLET}) == 0:
+        for i, (nm, kd) in enumerate([("Cash", "cash"), ("QRIS", "qris"), ("Debit", "debit"), ("Transfer", "transfer")]):
+            await insert("payment_methods", {"name": nm, "kind": kd, "fee_percent": 0.0, "fee_fixed": 0.0, "is_active": True, "sort": i})
+    if await db.fund_pockets.count_documents({"outlet_id": OUTLET}) == 0:
+        pk = [("HPP / Bahan Baku", "percent", 0), ("Gaji & Payroll", "percent", 0), ("WiFi", "fixed", 0), ("Listrik", "fixed", 0),
+              ("Air", "fixed", 0), ("Sewa", "fixed", 0), ("Operasional", "percent", 0), ("Perawatan Alat", "fixed", 0),
+              ("Pajak & Admin", "percent", 0), ("Dana Cadangan", "percent", 0)]
+        for i, (nm, mth, val) in enumerate(pk):
+            await insert("fund_pockets", {"name": nm, "description": "", "alloc_method": mth, "alloc_value": float(val), "is_active": True, "sort": i})
+    if await db.expense_categories.count_documents({"outlet_id": OUTLET}) == 0:
+        pockets = {p["name"]: p["id"] for p in await find("fund_pockets", limit=100)}
+        ec = [("Bahan Baku", "HPP / Bahan Baku"), ("Es Batu", "HPP / Bahan Baku"), ("Sampah / Kebersihan", "Operasional"),
+              ("Perlengkapan Operasional", "Operasional"), ("Transportasi", "Operasional"), ("Perbaikan Alat", "Perawatan Alat"),
+              ("Gaji", "Gaji & Payroll"), ("WiFi", "WiFi"), ("Listrik", "Listrik"), ("Air", "Air"), ("Sewa", "Sewa"),
+              ("Pajak & Admin", "Pajak & Admin"), ("Marketing", "Operasional"), ("Purchasing", "HPP / Bahan Baku"),
+              ("Biaya Pembayaran", "Operasional"), ("Lainnya", None)]
+        for i, (nm, pk_name) in enumerate(ec):
+            await insert("expense_categories", {"name": nm, "description": "", "pocket_id": pockets.get(pk_name), "is_active": True, "sort": i})
+    if await db.payroll_components.count_documents({"outlet_id": OUTLET}) == 0:
+        comps = [("Bonus Kehadiran", "bonus", "per_day_present", "Nominal per hari hadir"),
+                 ("Bonus Kedisiplinan", "bonus", "fixed", "Nominal tetap"),
+                 ("Bonus Target", "bonus", "fixed", "Nominal tetap pencapaian target"),
+                 ("Bonus Performa", "bonus", "fixed", "Nominal tetap"),
+                 ("Potongan Keterlambatan", "deduction", "per_late", "Nominal per keterlambatan"),
+                 ("Potongan Pelanggaran SOP", "deduction", "fixed", "Nominal tetap"),
+                 ("Potongan Kas/Selisih", "deduction", "manual", "Nominal diisi manual saat input")]
+        for i, (nm, tp, mth, desc) in enumerate(comps):
+            await insert("payroll_components", {"name": nm, "type": tp, "method": mth, "amount": 0.0, "description": desc, "is_active": True, "sort": i})
+    if await db.platforms.count_documents({"outlet_id": OUTLET}) == 0:
+        for i, nm in enumerate(["ShopeeFood", "GoFood", "GrabFood"]):
+            await insert("platforms", {"name": nm, "commission_percent": 0.0, "other_fee_percent": 0.0, "fee_fixed": 0.0,
+                                       "discount_borne_by": "outlet", "payout_schedule": "", "settlement_ref": "", "is_active": True, "sort": i})
     if await db.ingredients.count_documents({}) == 0:
         ings = [("Gula", "gram", 15, 5000, [8000, 1700, 0]), ("Teh Celup", "pcs", 300, 50, [200, 40, 0]),
                 ("Kopi Arabika", "gram", 250, 1000, [3000, 800, 0]), ("Susu UHT", "ml", 20, 3000, [10000, 2000, 0]),

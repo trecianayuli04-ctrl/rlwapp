@@ -27,6 +27,16 @@ Integrated cafe management app for ROLLOW (POS, recipes/HPP, inventory per locat
 - Payroll auto: hourly rate x worked hours + base + allowance + approved overtime - late penalty (tolerance, fixed/per-minute in settings); realtime payroll estimate; rate editor (owner/finance)
 - Tickets: Bar/Checker always printed (all items, simple), Dapur kitchen-only simple; customer receipt full
 ## Backlog
-- P0: Direct Bluetooth ESC/POS printing (needs dev build; ticket text lines already 32-col ready)
-- P1: Redeem loyalty points as discount, Multi-outlet switcher UI, printable/shareable receipts (Bluetooth printer), shift scheduling, assign opname tasks to crew
-- P2: Charts on reports, export Excel/PDF, supplier management, split server.py into routers
+- P0: Direct Bluetooth ESC/POS printing (needs dev build; escposText() 32/48-col ready in src/receipt.tsx)
+- P1: Multi-outlet switcher UI, shift scheduling, assign opname tasks to crew
+- P2: Export Excel/PDF, supplier management, split server.py into routers
+
+## Iteration 4 (2026-10) — Revisi besar kasir/keuangan
+- Config registries + CRUD + seed: payment_methods, expense_categories, fund_pockets (alloc %/fixed), payroll_components (bonus/deduction, metode fixed/percent_base/per_late/per_hour/manual), platforms (komisi/biaya) — endpoint /api/config/{kind}, editor generik /m/config
+- Cetak nota thermal 58mm & 80mm (kolom 32/48) + escposText() siap Bluetooth; cetak-ulang + log cetak (print_logs/print_count) tanpa ubah transaksi
+- Penyesuaian pembayaran nota /api/sales/{id}/adjust (refund/additional -> final_total, audit)
+- Pengeluaran/petty cash /api/expenses (+foto base64, approval opsional), decide; finance pakai kategori registry + kantong
+- Penjualan platform eksternal /api/external-sales (harga khusus, komisi, potong stok via resep, dedup order_no, channel=platform)
+- Finance summary /api/finance/summary: omzet gross/net/refund/hpp, by_method, by_channel, alokasi kantong vs realisasi, expenses per kategori
+- Audit viewer /api/audit + /m/audit (filter entity/date/user); mode stok detailed/simple (POS deduct ke gudang saat simple); QRIS/MDR settings UI
+- Payroll fix: slip pakai komponen (snapshot), UI pilih komponen (bug bonus/deduction lama teratasi)

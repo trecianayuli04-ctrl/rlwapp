@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, num, rp, useApi } from "@/src/api";
 import { usesNativeTabs } from "@/src/navigation";
 import { SaleTickets } from "@/src/sale-tickets";
+import { PettyCashSheet, ExternalOrderSheet } from "@/src/pos-extra";
 import { useAuth } from "@/src/auth";
 import { Handover, KioskAttendance, LiveAttendance, OpenRegister, useLiveAttendance } from "@/src/pos-shift";
 import { Btn, Card, Chips, Header, Icon, Page, rad, Sheet, sp, Stat, StateView, useStyles, useToast, useWide } from "@/src/ui";
@@ -35,11 +36,13 @@ export default function POS() {
   const [summary, setSummary] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const { data: settings } = useApi<any>("/settings");
-  const { user } = useAuth();
+  const { data: payMethods } = useApi<any[]>("/config/payment_methods?active=true");
+  const { user, can } = useAuth();
   const reg = useApi<any>("/register/current");
   const session = reg.data?.session;
   const live = useLiveAttendance();
   const [panel, setPanel] = useState<"handover" | "kiosk" | "live" | null>(null);
+  const [extra, setExtra] = useState<"petty" | "external" | null>(null);
   const [taxOn, setTaxOn] = useState(true);
   const [customer, setCustomer] = useState<any>(null);
   const [custOpen, setCustOpen] = useState(false);
@@ -56,6 +59,7 @@ export default function POS() {
   const lines = active.filter((m) => cart[m.id]).map((m) => ({ ...m, qty: cart[m.id] }));
   const subtotal = lines.reduce((a, l) => a + l.price * l.qty, 0);
   const pr = (promos || []).find((x) => x.id === promo);
+  const methodOptions = (payMethods && payMethods.length ? payMethods.map((m) => ({ label: m.name, value: m.name })) : METHODS);
   const discount = pr ? (pr.discount_type === "percent" ? (subtotal * pr.value) / 100 : Math.min(pr.value, subtotal)) : 0;
   const base = subtotal - discount;
   const service = settings?.service_percent ? (base * settings.service_percent) / 100 : 0;
@@ -172,7 +176,7 @@ export default function POS() {
       </View>
       <Text style={s.section}>Pembayaran</Text>
       <View style={{ marginHorizontal: -sp.lg }}>
-        <Chips testPrefix="pay-method" value={method} onChange={setMethod} options={METHODS} />
+        <Chips testPrefix="pay-method" value={method} onChange={setMethod} options={methodOptions} />
       </View>
       {method === "Cash" && (
         <TextInput testID="cash-received-input" placeholder="Uang diterima (opsional)" placeholderTextColor={colors.muted} keyboardType="numeric" value={cash} onChangeText={setCash} style={p.input} />
@@ -205,6 +209,8 @@ export default function POS() {
         {session && <Btn small variant="ghost" title="Pindah Shift" icon="swap-horizontal" testID="pos-handover-button" onPress={() => setPanel("handover")} />}
         <Btn small variant="ghost" title="Absen" icon="finger-print-outline" testID="pos-kiosk-button" onPress={() => setPanel("kiosk")} />
         <Btn small variant="ghost" title={`Live Absen · ${live.data?.summary.bertugas ?? 0} bertugas`} icon="pulse-outline" testID="pos-live-button" onPress={() => { live.reload(); setPanel("live"); }} />
+        {can("petty_cash") && <Btn small variant="ghost" title="Kas Keluar" icon="cash-outline" testID="pos-petty-button" onPress={() => setExtra("petty")} />}
+        {can("external_sales") && <Btn small variant="ghost" title="Pesanan App" icon="bicycle-outline" testID="pos-external-button" onPress={() => setExtra("external")} />}
       </ScrollView>
       {reg.data && !session ? (
         <OpenRegister userName={user?.name ?? ""} onOpened={() => reg.reload()} />
@@ -284,6 +290,8 @@ export default function POS() {
       <Sheet visible={panel === "live"} onClose={() => setPanel(null)} title="Absensi Realtime" testID="live-sheet">
         <LiveAttendance data={live.data} />
       </Sheet>
+      <PettyCashSheet visible={extra === "petty"} onClose={() => setExtra(null)} onDone={() => reg.reload()} />
+      <ExternalOrderSheet visible={extra === "external"} onClose={() => setExtra(null)} menus={menus || []} onDone={(sale) => { setReceipt(sale); reg.reload(); }} />
       <Sheet visible={closeOpen} onClose={() => setCloseOpen(false)} title="Tutup Kasir" testID="close-register-sheet">
         {!summary ? <StateView loading /> : (
           <View style={{ gap: sp.md }}>

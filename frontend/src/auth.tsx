@@ -39,6 +39,11 @@ export const PERM: Record<string, Role[]> = {
   customers: ["owner", "manager", "supervisor", "marketing", "crew"],
   attendance_live: ["owner", "manager", "supervisor", "finance", "crew"],
   overtime_approve: MGMT,
+  audit: ["owner", "finance"],
+  petty_cash: OPS,
+  petty_cash_approve: ["owner", "manager", "supervisor", "finance"],
+  adjust: ["owner", "manager", "supervisor", "finance"],
+  external_sales: ["owner", "manager", "supervisor", "crew", "finance"],
 };
 
 export const ROLE_LABEL: Record<Role, string> = {
